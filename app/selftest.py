@@ -36,8 +36,12 @@ def _check_config() -> None:
 
     config = normalize_config({"send_time": "7:30"})
     _check(config["send_time"] == "07:30", "配置补全失败")
-    _check(config["target_name"] == "", "缺省目标应为空")
+    _check(config["target_names"] == [], "缺省好友列表应为空")
     _check(config["daily_enabled"] is True, "缺省应开启每日定时")
+    migrated = normalize_config({"target_name": "旧版好友"})
+    _check(migrated["target_names"] == ["旧版好友"], "旧版单好友配置未迁移")
+    deduped = normalize_config({"target_names": ["小明", "小明", " 小红 ", ""]})
+    _check(deduped["target_names"] == ["小明", "小红"], "好友名去重失败")
 
 
 def _check_matching() -> None:
@@ -57,11 +61,18 @@ def _check_schedule() -> None:
 def _check_store() -> None:
     with tempfile.TemporaryDirectory() as folder:
         store = SendStore(Path(folder) / "history.json")
-        _check(store.has_success("2026-10-06") is False, "初始状态不应为已发送")
+        _check(store.is_success("2026-10-06", "小明") is False, "初始状态不应为已发送")
         store.record("failed", "小明", "hi", "网络错误", "自检", date_key="2026-10-06")
-        _check(store.has_success("2026-10-06") is False, "失败记录不应视为已发送")
+        _check(store.is_success("2026-10-06", "小明") is False, "失败记录不应视为已发送")
+        _check(store.attempt_count("2026-10-06", "小明") == 1, "失败次数统计失败")
         store.record("success", "小明", "hi", "已确认", "自检", date_key="2026-10-06")
-        _check(store.has_success("2026-10-06") is True, "成功记录应视为已发送")
+        _check(store.is_success("2026-10-06", "小明") is True, "成功记录应视为已发送")
+        _check(store.attempt_count("2026-10-06", "小明") == 2, "重复记录未累加尝试次数")
+        store.record("success", "小红", "hi", "已确认", "自检", date_key="2026-10-06")
+        _check(
+            store.pending_targets("2026-10-06", ["小明", "小红", "小刚"]) == ["小刚"],
+            "待发送好友筛选失败",
+        )
         _check(store.history(5)[0]["date"] == "2026-10-06", "历史记录读取失败")
 
 
@@ -73,26 +84,43 @@ def _check_scheduler() -> None:
             store = SendStore(Path(folder) / "history.json")
             calls = []
 
-            async def run_once(reason: str) -> None:
+            async def run_once(force: bool, reason: str) -> None:
                 calls.append(reason)
-                store.record("success", "小明", "hi", "已确认", reason)
+                for name in config.get("target_names") or ["小明"]:
+                    store.record("success", name, "hi", "已确认", reason)
 
             scheduler = DailyScheduler(lambda: config, run_once, store, logger, tick_seconds=5)
             await scheduler._tick()
             await scheduler._tick()
             _check(len(calls) == expected_calls, f"{label}：期望触发 {expected_calls} 次，实际 {len(calls)} 次")
 
-    base = normalize_config({"send_time": "00:01", "daily_enabled": True, "missed_run": True})
+    base = normalize_config(
+        {
+            "send_time": "00:01",
+            "daily_enabled": True,
+            "missed_run": True,
+            "target_names": ["小明", "小红"],
+        }
+    )
     asyncio.run(scenario(base, 1, "正常触发"))
 
     missed_time = (datetime.now(BEIJING) - timedelta(hours=6)).strftime("%H:%M")
     skipped = normalize_config(
-        {"send_time": missed_time, "daily_enabled": True, "missed_run": False, "missed_grace_minutes": 60}
+        {
+            "send_time": missed_time,
+            "daily_enabled": True,
+            "missed_run": False,
+            "missed_grace_minutes": 60,
+            "target_names": ["小明"],
+        }
     )
     asyncio.run(scenario(skipped, 0, "关闭补发时错过不触发"))
 
-    disabled = normalize_config({"send_time": "00:01", "daily_enabled": False})
+    disabled = normalize_config({"send_time": "00:01", "daily_enabled": False, "target_names": ["小明"]})
     asyncio.run(scenario(disabled, 0, "关闭定时不触发"))
+
+    no_target = normalize_config({"send_time": "00:01", "daily_enabled": True})
+    asyncio.run(scenario(no_target, 0, "没有好友时不触发"))
 
 
 TEST_PAGE = """
@@ -187,7 +215,7 @@ def _check_embedded_flow() -> None:
             application.wait_boot(60)
             _check(wait_page_ready(30.0), "自检页面没有加载出来")
             result = application.submit(
-                application.run_send_now(target="测试好友", message="自检消息")
+                application.run_send_now(targets=["测试好友", "另一个好友"], message="自检消息")
             ).result(timeout=150)
             outcome["result"] = result
 
@@ -220,11 +248,11 @@ def _check_embedded_flow() -> None:
     if outcome.get("error"):
         raise AssertionError(outcome["error"])
     result = outcome.get("result") or {}
-    _check(result.get("ok") is True, f"发送流程失败：{result.get('detail')}")
+    _check(result.get("ok") is True, f"发送流程失败：{result.get('detail')} | 明细：{result.get('results')}")
     probes = outcome.get("probes") or {}
     _check(probes.get("eval") == 2, "页面脚本执行失败")
     _check("自检页面" in str(probes.get("title")), "页面标题读取失败")
-    _check(int(probes.get("boxes") or 0) >= 1, "消息没有真正发送到会话里")
+    _check(int(probes.get("boxes") or 0) >= 2, "多好友发送没有全部落到会话里")
     _check(not str(probes.get("input") or "").strip(), "发送后输入框没有清空")
     _check((probes.get("click") or {}).get("clicked") is True, "元素点击失败")
     _check(len(probes.get("query") or []) >= 2, "元素查询失败")

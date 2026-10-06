@@ -36,6 +36,12 @@ def test_normalize_config() -> None:
     assert config["control_api_port"] == 1024
     assert config["daily_enabled"] is True
     assert config["match_mode"] == "equals"
+    assert config["target_names"] == []
+
+
+def test_target_names_migration_and_dedup() -> None:
+    assert normalize_config({"target_name": "旧版好友"})["target_names"] == ["旧版好友"]
+    assert normalize_config({"target_names": ["小明", "小明", " 小红 ", ""]})["target_names"] == ["小明", "小红"]
 
 
 def test_name_matching() -> None:
@@ -58,11 +64,14 @@ def test_scheduled_at() -> None:
 def test_send_store_single_success_per_day() -> None:
     with tempfile.TemporaryDirectory() as folder:
         store = SendStore(Path(folder) / "history.json")
-        assert store.has_success("2026-10-06") is False
+        assert store.is_success("2026-10-06", "小明") is False
         store.record("failed", "小明", "hi", "网络错误", "测试", date_key="2026-10-06")
-        assert store.has_success("2026-10-06") is False
+        assert store.is_success("2026-10-06", "小明") is False
+        assert store.attempt_count("2026-10-06", "小明") == 1
         store.record("success", "小明", "hi", "已确认", "测试", date_key="2026-10-06")
-        assert store.has_success("2026-10-06") is True
+        assert store.is_success("2026-10-06", "小明") is True
+        store.record("success", "小红", "hi", "已确认", "测试", date_key="2026-10-06")
+        assert store.pending_targets("2026-10-06", ["小明", "小红", "小刚"]) == ["小刚"]
 
 
 def _run_scheduler(config, expected_calls: int) -> None:
@@ -73,9 +82,10 @@ def _run_scheduler(config, expected_calls: int) -> None:
             store = SendStore(Path(folder) / "history.json")
             calls = []
 
-            async def run_once(reason: str) -> None:
+            async def run_once(force: bool, reason: str) -> None:
                 calls.append(reason)
-                store.record("success", "小明", "hi", "已确认", reason)
+                for name in config.get("target_names") or ["小明"]:
+                    store.record("success", name, "hi", "已确认", reason)
 
             scheduler = DailyScheduler(lambda: config, run_once, store, logger, tick_seconds=5)
             await scheduler._tick()
@@ -86,17 +96,27 @@ def _run_scheduler(config, expected_calls: int) -> None:
 
 
 def test_scheduler_triggers_once() -> None:
-    _run_scheduler(normalize_config({"send_time": "00:01", "missed_run": True}), 1)
+    _run_scheduler(
+        normalize_config({"send_time": "00:01", "missed_run": True, "target_names": ["小明", "小红"]}),
+        1,
+    )
 
 
 def test_scheduler_skips_when_disabled() -> None:
-    _run_scheduler(normalize_config({"send_time": "00:01", "daily_enabled": False}), 0)
+    _run_scheduler(
+        normalize_config({"send_time": "00:01", "daily_enabled": False, "target_names": ["小明"]}),
+        0,
+    )
+
+
+def test_scheduler_skips_without_targets() -> None:
+    _run_scheduler(normalize_config({"send_time": "00:01", "daily_enabled": True}), 0)
 
 
 def test_scheduler_skips_long_missed_run() -> None:
     missed = (datetime.now(BEIJING) - timedelta(hours=6)).strftime("%H:%M")
     config = normalize_config(
-        {"send_time": missed, "missed_run": False, "missed_grace_minutes": 60}
+        {"send_time": missed, "missed_run": False, "missed_grace_minutes": 60, "target_names": ["小明"]}
     )
     _run_scheduler(config, 0)
 

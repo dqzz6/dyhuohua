@@ -9,11 +9,12 @@ import os
 import secrets
 import threading
 from datetime import datetime
-from typing import Any, Coroutine, Dict, Optional
+from typing import Any, Coroutine, Dict, List, Optional
 
 from .browser import BrowserBridge
 from .config import load_config, save_config
 from .control_api import ControlServer
+from .friends import cache_avatar, collect_friends, write_cache
 from .logger import BEIJING, setup_logger
 from .paths import LOG_DIR, RUNTIME_PATH, ensure_dirs
 from .scheduler import DailyScheduler
@@ -21,10 +22,12 @@ from .selectors import load_selectors
 from .sender import (
     LoginRequiredError,
     SendError,
+    click_friends_tab,
     click_selector,
     probe_page,
     query_elements,
     send_message,
+    wait_for_chat_ready,
 )
 from .state import SendStore
 
@@ -161,20 +164,43 @@ class Application:
         browser_status = await self.browser.status()
         today = self.store.today_key()
         next_run = self.scheduler.next_run_at()
+        targets = self._targets()
+        success = [name for name in targets if self.store.is_success(today, name)]
         return {
             "browser": browser_status,
             "logged_in": await self._guess_logged_in(),
             "config": self.config_snapshot(),
             "today": {
                 "date": today,
-                "sent": self.store.has_success(today),
-                "record": self.store.get(today) or {},
+                "total": len(targets),
+                "sentCount": len(success),
+                "sent": bool(targets) and len(success) == len(targets),
+                "records": self.store.day_entries(today),
             },
             "next_run_at": next_run.isoformat(timespec="seconds") if next_run else "",
             "last_result": dict(self._last_result),
         }
 
     # ---------- 发送 ----------
+    def _targets(self) -> List[str]:
+        result: List[str] = []
+        for item in self.config.get("target_names") or []:
+            name = str(item or "").strip()
+            if name and name not in result:
+                result.append(name)
+        return result
+
+    async def scan_friends(self) -> List[Dict[str, Any]]:
+        """读取完整好友列表（会滚动到底部）并缓存头像。"""
+        await self._ensure_chat_page()
+        await wait_for_chat_ready(self.browser)
+        await click_friends_tab(self.browser, self.selectors, self.logger)
+        friends = await collect_friends(self.browser, self.selectors, self.logger)
+        for item in friends:
+            item["avatarPath"] = cache_avatar(str(item.get("avatar") or ""), str(item.get("name") or ""))
+        write_cache(friends)
+        return friends
+
     async def _ensure_chat_page(self) -> None:
         # 页面可能还在加载，先给几次机会，避免把已经打开的私信页重新导航掉。
         for _ in range(3):
@@ -188,52 +214,105 @@ class Application:
         await self.browser.goto(self.start_url())
         await asyncio.sleep(2)
 
-    async def run_send_now(self, target: str = "", message: str = "", reason: str = "手动") -> Dict[str, Any]:
+    async def run_send_now(
+        self,
+        targets: Optional[List[str]] = None,
+        message: str = "",
+        reason: str = "手动",
+        force: bool = True,
+    ) -> Dict[str, Any]:
         if self._send_lock is None:
             self._send_lock = asyncio.Lock()
         async with self._send_lock:
-            target_name = (target or self.config.get("target_name") or "").strip()
+            names = self._resolve_targets(targets)
             content = (message or self.config.get("message") or "").strip()
             timeout_seconds = int(self.config.get("send_timeout_seconds") or 120)
-            self.logger.info(f"开始发送（{reason}）：目标「{target_name or '未设置'}」")
-            try:
-                await self._ensure_chat_page()
-                result = await asyncio.wait_for(
-                    send_message(
-                        self.browser,
-                        target_name,
-                        content,
-                        self.selectors,
-                        self.logger,
-                        match_mode=str(self.config.get("match_mode") or "equals"),
-                        timeout_seconds=timeout_seconds,
-                    ),
-                    timeout=timeout_seconds,
-                )
-            except LoginRequiredError as exc:
-                payload = self._failure("login_required", str(exc), target_name, content, reason)
-            except SendError as exc:
-                payload = self._failure("send_failed", str(exc), target_name, content, reason)
-            except asyncio.TimeoutError:
-                payload = self._failure("timeout", f"发送超时（{timeout_seconds} 秒）", target_name, content, reason)
-            except Exception as exc:
-                payload = self._failure(type(exc).__name__, str(exc), target_name, content, reason)
-            else:
-                detail = str(result.get("detail") or "")
-                self.store.record("success", target_name, content, detail, reason)
-                payload = {"ok": True, "target": target_name, "message": content, "detail": detail, "reason": reason}
-                self.logger.info(f"发送成功：{detail}")
+            if not names:
+                detail = "没有可发送的好友，请先读取好友列表并勾选"
+                self.logger.error(f"发送失败（no_target）：{detail}")
+                payload = {"ok": False, "code": "no_target", "detail": detail, "results": []}
+                self._last_result = payload
+                return payload
 
+            self.logger.info(f"开始发送（{reason}）：共 {len(names)} 位好友")
+            await self._ensure_chat_page()
+
+            results: List[Dict[str, Any]] = []
+            stopped_early = False
+            for index, name in enumerate(names, start=1):
+                today = self.store.today_key()
+                if not force and self.store.is_success(today, name):
+                    continue
+                self.logger.info(f"[{index}/{len(names)}] 正在给「{name}」发送消息")
+                try:
+                    result = await asyncio.wait_for(
+                        send_message(
+                            self.browser,
+                            name,
+                            content,
+                            self.selectors,
+                            self.logger,
+                            match_mode=str(self.config.get("match_mode") or "equals"),
+                            timeout_seconds=timeout_seconds,
+                        ),
+                        timeout=timeout_seconds,
+                    )
+                except LoginRequiredError as exc:
+                    results.append(self._failure("login_required", str(exc), name, content, reason))
+                    stopped_early = True
+                    break
+                except SendError as exc:
+                    results.append(self._failure("send_failed", str(exc), name, content, reason))
+                except asyncio.TimeoutError:
+                    results.append(
+                        self._failure("timeout", f"发送超时（{timeout_seconds} 秒）", name, content, reason)
+                    )
+                except Exception as exc:
+                    results.append(self._failure(type(exc).__name__, str(exc), name, content, reason))
+                else:
+                    detail = str(result.get("detail") or "")
+                    self.store.record("success", name, content, detail, reason)
+                    results.append({"ok": True, "target": name, "detail": detail})
+                    self.logger.info(f"「{name}」发送成功：{detail}")
+                await asyncio.sleep(1.0)
+
+            success_count = sum(1 for item in results if item.get("ok"))
+            failed_names = [str(item.get("target")) for item in results if not item.get("ok")]
+            detail = f"成功 {success_count} 位，失败 {len(failed_names)} 位"
+            if stopped_early:
+                detail += "；登录状态失效，已提前终止"
+            if failed_names:
+                detail += f"（失败：{'、'.join(failed_names[:5])}）"
+            payload = {
+                "ok": bool(results) and not failed_names,
+                "detail": detail,
+                "results": results,
+                "successCount": success_count,
+                "failed": failed_names,
+                "reason": reason,
+            }
             self._last_result = payload
             return payload
+
+    def _resolve_targets(self, targets: Optional[List[str]]) -> List[str]:
+        if targets is None:
+            return self._targets()
+        if isinstance(targets, str):
+            targets = [targets]
+        result: List[str] = []
+        for item in targets:
+            name = str(item or "").strip()
+            if name and name not in result:
+                result.append(name)
+        return result
 
     def _failure(self, code: str, detail: str, target: str, message: str, reason: str) -> Dict[str, Any]:
         self.store.record("failed", target, message, f"[{code}] {detail}", reason)
         self.logger.error(f"发送失败（{code}）：{detail}")
         return {"ok": False, "code": code, "detail": detail, "target": target, "message": message, "reason": reason}
 
-    async def _scheduled_run(self, reason: str) -> Dict[str, Any]:
-        return await self.run_send_now(reason=reason)
+    async def _scheduled_run(self, force: bool = False, reason: str = "定时任务") -> Dict[str, Any]:
+        return await self.run_send_now(reason=reason, force=bool(force))
 
     # ---------- 控制接口用到的页面操作 ----------
     async def evaluate_script(self, script: str) -> Any:

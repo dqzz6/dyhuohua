@@ -128,15 +128,19 @@ class _Handler(BaseHTTPRequestHandler):
             elif method == "GET" and path == "/pages":
                 self._send_json({"ok": True, "data": self._run(app.pages_info(), 60)})
             elif method == "POST" and path == "/send":
+                raw_targets = body.get("targets")
+                targets = raw_targets if isinstance(raw_targets, list) else None
                 data = self._run(
                     app.run_send_now(
-                        target=str(body.get("target") or ""),
+                        targets=targets,
                         message=str(body.get("message") or ""),
                         reason="本地接口",
                     ),
                     300,
                 )
                 self._send_json({"ok": True, "data": data})
+            elif method == "POST" and path == "/friends":
+                self._send_json({"ok": True, "data": self._run(app.scan_friends(), 600)})
             elif method == "GET" and path == "/history":
                 self._send_json({"ok": True, "data": app.store.history(50)})
             else:

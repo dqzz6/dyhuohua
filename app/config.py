@@ -13,12 +13,14 @@ from .paths import CONFIG_PATH, ensure_dirs
 TIME_PATTERN = re.compile(r"^(\d{1,2}):(\d{1,2})$")
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "target_name": "",
+    "target_names": [],
     "message": "续火花",
     "send_time": "09:00",
     "daily_enabled": True,
     "missed_run": False,
     "missed_grace_minutes": 180,
+    "retry_interval_minutes": 10,
+    "max_attempts_per_day": 3,
     "start_url": "https://creator.douyin.com/creator-micro/data/following/chat",
     "match_mode": "equals",
     "headless": False,
@@ -44,23 +46,40 @@ def normalize_time(value: Any) -> str:
 
 def normalize_config(raw: Dict[str, Any]) -> Dict[str, Any]:
     """合并缺省值并做类型与范围校正。"""
+    source = dict(raw or {})
     merged = copy.deepcopy(DEFAULT_CONFIG)
-    for key, value in dict(raw or {}).items():
+    for key, value in source.items():
         if key in merged:
             merged[key] = value
 
     merged["send_time"] = normalize_time(merged.get("send_time"))
-    merged["target_name"] = str(merged.get("target_name") or "").strip()
+    merged["target_names"] = _normalize_target_names(source.get("target_names"), source.get("target_name"))
     merged["message"] = str(merged.get("message") or "").strip()
     merged["match_mode"] = "contains" if str(merged.get("match_mode")) == "contains" else "equals"
     merged["daily_enabled"] = bool(merged.get("daily_enabled"))
     merged["missed_run"] = bool(merged.get("missed_run"))
     merged["headless"] = bool(merged.get("headless"))
     merged["missed_grace_minutes"] = max(0, _to_int(merged.get("missed_grace_minutes"), 180))
+    merged["retry_interval_minutes"] = max(1, _to_int(merged.get("retry_interval_minutes"), 10))
+    merged["max_attempts_per_day"] = min(10, max(1, _to_int(merged.get("max_attempts_per_day"), 3)))
     merged["control_api_port"] = min(65500, max(1024, _to_int(merged.get("control_api_port"), 8791)))
     merged["send_timeout_seconds"] = max(30, _to_int(merged.get("send_timeout_seconds"), 120))
     merged["start_url"] = str(merged.get("start_url") or DEFAULT_CONFIG["start_url"]).strip()
+    merged.pop("target_name", None)
     return merged
+
+
+def _normalize_target_names(names: Any, legacy_target: Any = None) -> list:
+    """好友名去重去空白；同时兼容旧版单好友配置。"""
+    result: list = []
+    for item in list(names or []) if isinstance(names, (list, tuple)) else []:
+        text = str(item or "").strip()
+        if text and text not in result:
+            result.append(text)
+    legacy = str(legacy_target or "").strip()
+    if legacy and legacy not in result:
+        result.insert(0, legacy)
+    return result
 
 
 def _to_int(value: Any, default: int) -> int:

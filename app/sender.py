@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import unicodedata
 from typing import Any, Dict, List, Tuple
 
 from .cdp import CdpError
+from .jsbridge import build_script
 
 
 class SendError(RuntimeError):
@@ -47,33 +47,8 @@ def name_matches(candidate: str, target: str, mode: str = "equals") -> bool:
     return left == right
 
 
-JS_PRELUDE = r"""
-const queryAll = (selector) => {
-  try {
-    if (typeof selector === 'string' && selector.indexOf('xpath=') === 0) {
-      const result = document.evaluate(
-        selector.slice(6), document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null
-      );
-      const nodes = [];
-      for (let index = 0; index < result.snapshotLength; index += 1) nodes.push(result.snapshotItem(index));
-      return nodes;
-    }
-    return Array.from(document.querySelectorAll(selector));
-  } catch (error) {
-    return [];
-  }
-};
-const queryOne = (selector, index) => {
-  const nodes = queryAll(selector);
-  if (!nodes.length) return null;
-  return (index === undefined) ? nodes[0] : (nodes[index] || null);
-};
-"""
-
-
 def _script(body: str, args: Dict[str, Any]) -> str:
-    payload = json.dumps(args, ensure_ascii=False)
-    return "(() => {\nconst A = " + payload + ";\n" + JS_PRELUDE + "\n" + body + "\n})()"
+    return build_script(body, args)
 
 
 PROBE_BODY = r"""
@@ -247,18 +222,6 @@ async def click_friends_tab(bridge, selectors: Dict[str, List[str]], logger) -> 
 
 
 FRIEND_SCAN_BODY = r"""
-const pick = (selectorList) => {
-  for (const selector of selectorList) {
-    const nodes = queryAll(selector);
-    if (nodes.length) return nodes;
-  }
-  return [];
-};
-const normalize = (value) => (value || '')
-  .normalize('NFKC')
-  .replace(/[\u200b\u200c\u200d\ufeff]/g, '')
-  .replace(/\s+/g, ' ')
-  .trim();
 const nameOf = (node) => {
   for (const selector of A.nameSelectors) {
     const targetNode = node.querySelector(selector);
@@ -268,12 +231,12 @@ const nameOf = (node) => {
   const own = (node.innerText || '').trim();
   return own ? own.split('\n')[0] : '';
 };
-const nodes = pick(A.itemSelectors);
-const wanted = normalize(A.target);
+const nodes = pickNodes(A.itemSelectors);
+const wanted = normalizeName(A.target);
 const names = [];
 let hit = null;
 for (const node of nodes) {
-  const name = normalize(nameOf(node));
+  const name = normalizeName(nameOf(node));
   if (!name) continue;
   if (names.indexOf(name) < 0) names.push(name);
   if (hit) continue;

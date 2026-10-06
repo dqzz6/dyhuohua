@@ -12,6 +12,8 @@ CONFIG_PATH = DATA_DIR / "config.json"
 HISTORY_PATH = DATA_DIR / "send_history.json"
 SELECTORS_PATH = DATA_DIR / "selectors.json"
 RUNTIME_PATH = DATA_DIR / "runtime.json"
+AVATAR_DIR = DATA_DIR / "avatars"
+FRIENDS_CACHE_PATH = DATA_DIR / "friends_cache.json"
 # 内置浏览器（QtWebEngine）的登录数据目录
 PROFILE_DIR = DATA_DIR / "web-profile"
 
@@ -20,3 +22,4 @@ def ensure_dirs() -> None:
     """确保数据目录与日志目录存在。"""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
+    AVATAR_DIR.mkdir(parents=True, exist_ok=True)
