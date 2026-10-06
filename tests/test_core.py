@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import normalize_config, normalize_time  # noqa: E402
 from app.friends import extract_user_details, merge_friends, normalize_key  # noqa: E402
+from app.gui import filter_friend_names, order_selected_names  # noqa: E402
 from app.logger import BEIJING  # noqa: E402
 from app.scheduler import DailyScheduler, scheduled_at  # noqa: E402
 from app.sender import SendError, name_matches, normalize_text, send_message  # noqa: E402
@@ -79,6 +80,24 @@ def test_merge_friends_removes_noise() -> None:
     assert all(item["userId"] for item in merged)
     assert merge_friends(dom, []) == []
     assert normalize_key("Ａ Ｂ\u200b") == "ab"
+
+
+def test_friend_search_and_selection_order() -> None:
+    friends = [
+        {"name": "凡宝"},
+        {"name": "小明"},
+        {"name": "小明明"},
+        {"name": "ＡＢＣ"},
+        {"name": "  "},
+    ]
+    assert filter_friend_names(friends, "") == ["凡宝", "小明", "小明明", "ＡＢＣ"]
+    assert filter_friend_names(friends, "小明") == ["小明", "小明明"]
+    assert filter_friend_names(friends, "abc") == ["ＡＢＣ"]
+    assert filter_friend_names(friends, "不存在") == []
+
+    assert order_selected_names(friends, {"小明明", "凡宝"}) == ["凡宝", "小明明"]
+    assert order_selected_names(friends, {"凡宝", "已消失的好友"}) == ["凡宝", "已消失的好友"]
+    assert order_selected_names(friends, set()) == []
 
 
 def test_name_matching() -> None:
