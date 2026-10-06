@@ -141,6 +141,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, "data": data})
             elif method == "POST" and path == "/friends":
                 self._send_json({"ok": True, "data": self._run(app.scan_friends(), 600)})
+            elif method == "POST" and path == "/friends/check":
+                self._send_json({"ok": True, "data": self._run(app.ensure_friends_ready(), 600)})
             elif method == "GET" and path == "/capture":
                 keyword = str((params.get("keyword", [""])[0]) or "")
                 limit = int((params.get("limit", ["50"])[0]) or 50)

@@ -61,6 +61,34 @@ const findScrollContainer = (scrollSelectors, itemSelector) => {
   }
   return null;
 };
+const scrollTarget = (scrollSelectors, itemSelector) => {
+  const node = findScrollContainer(scrollSelectors, itemSelector);
+  if (!node) return { found: false, node: null, max: 0 };
+  return { found: true, node: node, max: Math.max(0, node.scrollHeight - node.clientHeight) };
+};
+"""
+
+# 把列表滚回顶部（虚拟列表必须从顶部开始逐段扫描，否则会漏）
+RESET_SCROLL_BODY = r"""
+const target = scrollTarget(A.scrollSelectors, A.itemSelector);
+if (!target.found) return { reset: false, max: 0 };
+target.node.scrollTop = 0;
+return { reset: true, max: target.max };
+"""
+
+# 向下滚动一屏，并返回是否到底
+SCROLL_DOWN_BODY = r"""
+const target = scrollTarget(A.scrollSelectors, A.itemSelector);
+if (!target.found) return { scrolled: false, atBottom: true, notFound: true };
+const before = target.node.scrollTop;
+target.node.scrollTop = Math.min(target.max, before + A.step);
+return {
+  before: before,
+  after: target.node.scrollTop,
+  max: target.max,
+  scrolled: target.node.scrollTop > before,
+  atBottom: target.node.scrollTop >= target.max - 4,
+};
 """
 
 

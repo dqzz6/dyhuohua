@@ -20,6 +20,8 @@ from .friends import (
     collect_friends,
     extract_user_details,
     merge_friends,
+    read_cache,
+    read_visible_friends,
     write_cache,
 )
 from .logger import BEIJING, setup_logger
@@ -230,6 +232,55 @@ class Application:
                 item["avatarPath"] = cache_avatar(str(item.get("avatar") or ""), str(item.get("name") or ""))
             write_cache(friends)
         return friends
+
+    async def check_friends_fresh(self, sample_size: int = 3) -> Dict[str, Any]:
+        """只校验缓存名单最前面几位是否还在当前列表里，不做整表滚动。"""
+        cached = read_cache()
+        if not cached:
+            return {"fresh": False, "reason": "没有缓存名单", "friends": []}
+        sample = [str(item.get("name") or "") for item in cached[: max(1, int(sample_size))]]
+        visible = [
+            str(item.get("name") or "")
+            for item in await read_visible_friends(self.browser, self.selectors)
+        ]
+        hit = sum(1 for name in sample if name in visible)
+        need = 1 if len(sample) == 1 else 2
+        return {
+            "fresh": hit >= min(need, len(sample)),
+            "sample": sample,
+            "hit": hit,
+            "visible": len(visible),
+            "friends": cached,
+        }
+
+    async def ensure_friends_ready(self, force: bool = False) -> Dict[str, Any]:
+        """启动时优先复用缓存名单，只有快速校验不通过才整表重读。"""
+        if force:
+            return {"mode": "full", "friends": await self.scan_friends()}
+
+        cached = read_cache()
+        try:
+            await wait_for_chat_ready(self.browser, timeout_seconds=12)
+        except Exception as exc:
+            if cached:
+                self.logger.info(f"私信页尚未就绪（{exc}），先沿用上次的好友名单")
+                return {"mode": "cache", "friends": cached, "note": "页面未就绪"}
+            return {"mode": "empty", "friends": []}
+
+        for attempt in range(3):
+            check = await self.check_friends_fresh()
+            if check.get("fresh"):
+                self.logger.info(
+                    f"好友名单快速校验通过（比对 {check.get('hit')}/{len(check.get('sample') or [])} 位），直接沿用上次名单"
+                )
+                return {"mode": "cache", "friends": check.get("friends") or []}
+            if not check.get("friends"):
+                break
+            if attempt < 2:
+                await asyncio.sleep(1.5)
+
+        self.logger.info("好友名单快速校验未通过，重新读取完整好友列表")
+        return {"mode": "full", "friends": await self.scan_friends()}
 
     # ---------- 接口抓包（联调排查用） ----------
     def capture_summary(self, keyword: str = "", limit: int = 50) -> List[Dict[str, Any]]:

@@ -453,11 +453,34 @@ class MainWindow(QMainWindow):
         def worker() -> None:
             try:
                 friends = self.app.submit(self.app.scan_friends()).result(timeout=900)
-                self.friends_ready.emit({"ok": True, "friends": friends, "auto": auto})
+                self.friends_ready.emit({"ok": True, "friends": friends, "auto": auto, "mode": "full"})
             except Exception as exc:
                 self.friends_ready.emit({"ok": False, "detail": str(exc), "auto": auto})
 
         threading.Thread(target=worker, name="scan-friends", daemon=True).start()
+
+    def _ensure_friends(self) -> None:
+        """启动后先做快速校验：缓存名单还能对上就直接用，不再整表重读。"""
+        if self._busy:
+            return
+        self._busy = True
+        self.button_scan.setEnabled(False)
+
+        def worker() -> None:
+            try:
+                result = self.app.submit(self.app.ensure_friends_ready()).result(timeout=900)
+                self.friends_ready.emit(
+                    {
+                        "ok": True,
+                        "friends": result.get("friends") or [],
+                        "auto": True,
+                        "mode": result.get("mode") or "cache",
+                    }
+                )
+            except Exception as exc:
+                self.friends_ready.emit({"ok": False, "detail": str(exc), "auto": True})
+
+        threading.Thread(target=worker, name="check-friends", daemon=True).start()
 
     def _on_friends_ready(self, payload: dict) -> None:
         self._busy = False
@@ -471,6 +494,13 @@ class MainWindow(QMainWindow):
         self._friends = list(friends)
         self._refresh_friend_list()
         self._refresh_selected_list()
+        mode = str(payload.get("mode") or "")
+        if mode == "cache":
+            self.label_friends.setText(
+                f"已沿用上次的好友名单（{len(friends)} 位），需要完整刷新时点「读取好友列表」。"
+            )
+        elif mode == "empty":
+            self.label_friends.setText("私信页还没就绪，登录后会自动读取好友列表。")
         if not friends:
             self.label_friends.setText("没有读取到好友，请确认内置浏览器已经登录并停留在私信页。")
 
@@ -555,8 +585,8 @@ class MainWindow(QMainWindow):
         """登录成功后自动读取一次好友列表。"""
         if logged_in is True and self._last_logged_in is not True and not self._auto_scanned and not self._busy:
             self._auto_scanned = True
-            self.label_friends.setText("检测到已登录，正在自动读取好友列表……")
-            self._scan_friends(auto=True)
+            self.label_friends.setText("检测到已登录，正在校验好友名单……")
+            self._ensure_friends()
         self._last_logged_in = logged_in
 
     # ---------- 生命周期 ----------

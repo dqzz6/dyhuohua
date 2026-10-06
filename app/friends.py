@@ -12,7 +12,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List
 
-from .jsbridge import build_script
+from .jsbridge import RESET_SCROLL_BODY, SCROLL_DOWN_BODY, build_script
 from .paths import AVATAR_DIR, FRIENDS_CACHE_PATH
 
 AVATAR_TIMEOUT = 10
@@ -152,28 +152,6 @@ for (const node of nodes) {
 return { friends: friends, loose: loose, count: nodes.length };
 """
 
-SCROLL_BODY = r"""
-const target = findScrollContainer(A.scrollSelectors, A.itemSelector);
-if (!target) return { before: 0, after: 0, max: 0, atBottom: true, notFound: true };
-const before = target.scrollTop;
-const max = Math.max(0, target.scrollHeight - target.clientHeight);
-target.scrollTop = Math.min(max, before + A.step);
-return {
-  before: before,
-  after: target.scrollTop,
-  max: max,
-  atBottom: target.scrollTop >= max - 4,
-};
-"""
-
-RESET_BODY = r"""
-const target = findScrollContainer(A.scrollSelectors, A.itemSelector);
-if (!target) return { reset: false };
-target.scrollTop = 0;
-return { reset: true, max: Math.max(0, target.scrollHeight - target.clientHeight) };
-"""
-
-
 async def collect_friends(
     bridge,
     selectors: Dict[str, List[str]],
@@ -224,7 +202,7 @@ async def collect_friends(
 
     async def one_pass(pass_index: int) -> None:
         # 虚拟列表会复用节点，必须先回到顶部再逐段下滑，否则只能读到当前可视区域。
-        reset = await bridge.evaluate(build_script(RESET_BODY, scroll_args))
+        reset = await bridge.evaluate(build_script(RESET_SCROLL_BODY, scroll_args))
         await asyncio.sleep(1.5)
         if logger is not None and pass_index == 1 and not (isinstance(reset, dict) and reset.get("reset")):
             logger.warning("没有找到好友列表的滚动容器，只能读取当前可见的好友")
@@ -232,7 +210,7 @@ async def collect_friends(
         idle_rounds = 0
         for round_index in range(max_scrolls):
             added = await scan_once()
-            scroll = await bridge.evaluate(build_script(SCROLL_BODY, scroll_args))
+            scroll = await bridge.evaluate(build_script(SCROLL_DOWN_BODY, scroll_args))
             await asyncio.sleep(1.3)
             scroll = scroll if isinstance(scroll, dict) else {}
             moved = int(scroll.get("after") or 0) > int(scroll.get("before") or 0)
@@ -258,6 +236,32 @@ async def collect_friends(
     if logger is not None:
         logger.info(f"好友列表扫描完成，共 {len(friends)} 位好友")
     return list(friends.values())
+
+
+async def read_visible_friends(
+    bridge,
+    selectors: Dict[str, List[str]],
+) -> List[Dict[str, str]]:
+    """只读取当前已渲染的好友（不滚动），用于启动时的快速校验。"""
+    data = await bridge.evaluate(
+        build_script(
+            COLLECT_BODY,
+            {
+                "itemSelectors": selectors.get("friend_item", []),
+                "nameSelectors": selectors.get("friend_name", []),
+            },
+        )
+    )
+    payload = data if isinstance(data, dict) else {}
+    result: List[Dict[str, str]] = []
+    seen: set = set()
+    for item in (payload.get("friends") or []) + (payload.get("loose") or []):
+        name = str(item.get("name") or "").strip()
+        if not name or name in seen or JUNK_NAME_PATTERN.match(name):
+            continue
+        seen.add(name)
+        result.append({"name": name, "avatar": str(item.get("avatar") or "")})
+    return result
 
 
 def cache_avatar(url: str, name: str, avatar_dir: Path = AVATAR_DIR) -> str:

@@ -136,7 +136,8 @@ TINY_PNG = (
     "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 )
 
-TEST_FRIEND_NAMES = ["测试好友", "另一个好友"] + [f"好友{index:02d}" for index in range(3, 26)]
+# 要发送的好友特意放在列表最底部，用来验证发送时会自动滑动查找
+TEST_FRIEND_NAMES = [f"好友{index:02d}" for index in range(1, 24)] + ["测试好友", "另一个好友"]
 
 _TEST_FRIEND_ITEMS = "".join(
     f'<div class="item"><img src="{TINY_PNG}"><span class="name">{name}</span></div>'
@@ -252,6 +253,10 @@ def _check_embedded_flow() -> None:
                     "screenshot": await application.take_screenshot(False),
                     "html": await application.page_html(0),
                     "friends": await application.scan_friends(cache=False, reload=False),
+                    "scrollTop": await bridge.evaluate(
+                        "(document.querySelector('#friend-list') || {}).scrollTop || 0"
+                    ),
+                    "fresh": await application.check_friends_fresh(),
                 }
 
             outcome["probes"] = application.submit(probes()).result(timeout=90)
@@ -284,8 +289,16 @@ def _check_embedded_flow() -> None:
         len(names) >= len(TEST_FRIEND_NAMES),
         f"好友列表没有滚动收集完整：{len(names)}/{len(TEST_FRIEND_NAMES)} 位",
     )
-    _check("好友25" in names and "测试好友" in names, "好友列表缺少首尾好友")
+    _check("好友23" in names and "测试好友" in names, "好友列表缺少首尾好友")
     _check(any(item.get("avatar") for item in friends), "没有解析到头像")
+    _check(
+        float(probes.get("scrollTop") or 0) > 0,
+        "发送时没有自动滑动好友列表",
+    )
+    _check(
+        (probes.get("fresh") or {}).get("fresh") is False,
+        "快速校验在没有缓存对应好友时不应判定为通过",
+    )
 
 
 def run_selftest(include_browser: bool = False) -> int:

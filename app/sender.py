@@ -7,7 +7,7 @@ import unicodedata
 from typing import Any, Dict, List, Tuple
 
 from .cdp import CdpError
-from .jsbridge import build_script
+from .jsbridge import RESET_SCROLL_BODY, SCROLL_DOWN_BODY, build_script
 
 
 class SendError(RuntimeError):
@@ -264,26 +264,17 @@ node.click();
 return { clicked: true };
 """
 
-SCROLL_LIST_BODY = r"""
-const target = findScrollContainer(A.scrollSelectors, A.itemSelector);
-if (!target) return { scrolled: false };
-const before = target.scrollTop;
-target.scrollTop = before + 600;
-return { scrolled: target.scrollTop > before };
-"""
-
-
 async def find_friend(
     bridge,
     target_name: str,
     selectors: Dict[str, List[str]],
-    logger,
+    logger=None,
     match_mode: str = "equals",
-    max_scrolls: int = 60,
+    max_scrolls: int = 120,
+    step: int = 500,
 ) -> Dict[str, Any]:
-    """在好友列表里查找目标好友，必要时滚动加载更多。"""
+    """在好友列表里查找目标好友：先回到顶部，再逐段下滑，直到找到或到底。"""
     seen_names: List[str] = []
-    empty_rounds = 0
     args = {
         "itemSelectors": selectors.get("friend_item", []),
         "nameSelectors": selectors.get("friend_name", []),
@@ -293,7 +284,14 @@ async def find_friend(
     scroll_args = {
         "scrollSelectors": selectors.get("friend_list_scroll", []),
         "itemSelector": (selectors.get("friend_item") or [""])[0],
+        "step": int(step),
     }
+
+    # 好友可能在列表任意位置，先把列表滚回顶部再向下找，避免每次都从头开始找不到。
+    reset = await bridge.evaluate(_script(RESET_SCROLL_BODY, scroll_args))
+    await asyncio.sleep(0.8)
+    if logger is not None and isinstance(reset, dict) and not reset.get("reset"):
+        logger.warning("没有找到好友列表的滚动容器，只能在当前可见范围内查找")
 
     for round_index in range(max_scrolls):
         result = await bridge.evaluate(_script(FRIEND_SCAN_BODY, args))
@@ -304,20 +302,18 @@ async def find_friend(
                 seen_names.append(name)
 
         if result.get("matched"):
-            logger.info(f"已找到好友：{target_name}（匹配方式：{match_mode}）")
+            if logger is not None:
+                logger.info(f"已找到好友：{target_name}（匹配方式：{match_mode}）")
             return {"matched": True, "point": result.get("point") or {}}
 
-        if round_index == 0:
+        if round_index == 0 and logger is not None:
             logger.info(f"好友列表当前可见 {int(result.get('total') or 0)} 项，开始滚动查找")
 
-        scrolled = await bridge.evaluate(_script(SCROLL_LIST_BODY, scroll_args))
-        await asyncio.sleep(1.2)
-        if isinstance(scrolled, dict) and scrolled.get("scrolled"):
-            empty_rounds = 0
-        else:
-            empty_rounds += 1
-            if empty_rounds >= 2:
-                break
+        scroll = await bridge.evaluate(_script(SCROLL_DOWN_BODY, scroll_args))
+        await asyncio.sleep(1.0)
+        scroll = scroll if isinstance(scroll, dict) else {}
+        if scroll.get("atBottom") or not scroll.get("scrolled"):
+            break
 
     preview = "、".join(seen_names[:30]) if seen_names else "无"
     raise TargetNotFoundError(f"未在好友列表中找到「{target_name}」。已看到：{preview}")
