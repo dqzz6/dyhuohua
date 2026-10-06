@@ -123,16 +123,26 @@ def _check_scheduler() -> None:
     asyncio.run(scenario(no_target, 0, "没有好友时不触发"))
 
 
+TINY_PNG = (
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+
+TEST_FRIEND_NAMES = ["测试好友", "另一个好友"] + [f"好友{index:02d}" for index in range(3, 26)]
+
+_TEST_FRIEND_ITEMS = "".join(
+    f'<div class="item"><img src="{TINY_PNG}"><span class="name">{name}</span></div>'
+    for name in TEST_FRIEND_NAMES
+)
+
 TEST_PAGE = """
 <!doctype html>
 <html><head><meta charset="utf-8"><title>自检页面</title></head>
 <body>
 <div id="sub-app">
   <div id="friends-tab">朋友私信</div>
-  <ul id="friend-list">
-    <li class="item"><span class="name">测试好友</span></li>
-    <li class="item"><span class="name">另一个好友</span></li>
-  </ul>
+  <div id="friend-list" style="height:200px;overflow-y:auto;border:1px solid #ddd">
+    __FRIEND_ITEMS__
+  </div>
   <div id="messages"></div>
   <div id="editor" contenteditable="true" role="textbox"
        style="height:60px;border:1px solid #ccc;margin-top:8px"></div>
@@ -155,7 +165,7 @@ editor.addEventListener('keydown', (event) => {
 });
 </script>
 </body></html>
-"""
+""".replace("__FRIEND_ITEMS__", _TEST_FRIEND_ITEMS)
 
 TEST_SELECTORS = {
     "chat_urls": ["about:blank"],
@@ -232,6 +242,7 @@ def _check_embedded_flow() -> None:
                     "query": await application.query_selector(".item", 5),
                     "screenshot": await application.take_screenshot(False),
                     "html": await application.page_html(0),
+                    "friends": await application.scan_friends(cache=False),
                 }
 
             outcome["probes"] = application.submit(probes()).result(timeout=90)
@@ -258,6 +269,14 @@ def _check_embedded_flow() -> None:
     _check(len(probes.get("query") or []) >= 2, "元素查询失败")
     _check(Path(str((probes.get("screenshot") or {}).get("path"))).exists(), "截图失败")
     _check("sub-app" in str(probes.get("html") or ""), "页面 HTML 读取失败")
+    friends = probes.get("friends") or []
+    names = [str(item.get("name") or "") for item in friends]
+    _check(
+        len(names) >= len(TEST_FRIEND_NAMES),
+        f"好友列表没有滚动收集完整：{len(names)}/{len(TEST_FRIEND_NAMES)} 位",
+    )
+    _check("好友25" in names and "测试好友" in names, "好友列表缺少首尾好友")
+    _check(any(item.get("avatar") for item in friends), "没有解析到头像")
 
 
 def run_selftest(include_browser: bool = False) -> int:

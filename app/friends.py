@@ -7,6 +7,7 @@ import base64
 import hashlib
 import json
 import mimetypes
+import re
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List
@@ -16,16 +17,16 @@ from .paths import AVATAR_DIR, FRIENDS_CACHE_PATH
 
 AVATAR_TIMEOUT = 10
 AVATAR_MAX_BYTES = 3 * 1024 * 1024
+JUNK_NAME_PATTERN = re.compile(r"^(\d+|\d{1,2}:\d{2}.*)$")
 
 COLLECT_BODY = r"""
-const nameOf = (node) => {
+const strictNameOf = (node) => {
   for (const selector of A.nameSelectors) {
     const targetNode = node.querySelector(selector);
     const text = targetNode ? (targetNode.innerText || targetNode.textContent || '').trim() : '';
     if (text) return text.split('\n')[0];
   }
-  const own = (node.innerText || '').trim();
-  return own ? own.split('\n')[0] : '';
+  return '';
 };
 const isImageUrl = (value) => {
   const url = String(value || '').trim();
@@ -48,40 +49,38 @@ const findAvatar = (node) => {
 };
 const nodes = pickNodes(A.itemSelectors);
 const friends = [];
+const loose = [];
 for (const node of nodes) {
-  const name = normalizeName(nameOf(node));
-  if (!name) continue;
-  friends.push({ name: name, avatar: findAvatar(node) });
+  const strict = normalizeName(strictNameOf(node));
+  const own = normalizeName((node.innerText || '').split('\n')[0]);
+  if (strict) {
+    friends.push({ name: strict, avatar: findAvatar(node) });
+  } else if (own) {
+    loose.push({ name: own, avatar: findAvatar(node) });
+  }
 }
-return { friends: friends, count: nodes.length };
+return { friends: friends, loose: loose, count: nodes.length };
 """
 
 SCROLL_BODY = r"""
-const applyScroll = (node, step) => {
-  if (!node) return null;
-  const before = node.scrollTop;
-  const max = Math.max(0, node.scrollHeight - node.clientHeight);
-  node.scrollTop = Math.min(max, before + step);
-  return {
-    before: before,
-    after: node.scrollTop,
-    max: max,
-    atBottom: node.scrollTop >= max - 4,
-  };
+const target = findScrollContainer(A.scrollSelectors, A.itemSelector);
+if (!target) return { before: 0, after: 0, max: 0, atBottom: true, notFound: true };
+const before = target.scrollTop;
+const max = Math.max(0, target.scrollHeight - target.clientHeight);
+target.scrollTop = Math.min(max, before + A.step);
+return {
+  before: before,
+  after: target.scrollTop,
+  max: max,
+  atBottom: target.scrollTop >= max - 4,
 };
-for (const selector of A.scrollSelectors) {
-  const result = applyScroll(queryOne(selector), A.step);
-  if (result) return result;
-}
-const items = queryAll(A.itemSelector);
-let node = items.length ? items[items.length - 1] : null;
-while (node && node !== document.body && node !== document.documentElement) {
-  const style = getComputedStyle(node);
-  const scrollable = /(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 40;
-  if (scrollable) return applyScroll(node, A.step);
-  node = node.parentElement;
-}
-return { before: 0, after: 0, max: 0, atBottom: true, notFound: true };
+"""
+
+RESET_BODY = r"""
+const target = findScrollContainer(A.scrollSelectors, A.itemSelector);
+if (!target) return { reset: false };
+target.scrollTop = 0;
+return { reset: true, max: Math.max(0, target.scrollHeight - target.clientHeight) };
 """
 
 
@@ -90,9 +89,10 @@ async def collect_friends(
     selectors: Dict[str, List[str]],
     logger=None,
     max_scrolls: int = 120,
-    step: int = 700,
+    step: int = 500,
+    passes: int = 2,
 ) -> List[Dict[str, str]]:
-    """滚动整个好友列表并收集名字与头像地址。"""
+    """滚动整个好友列表并收集名字与头像地址；多跑几遍取并集，避免虚拟列表渲染延迟漏人。"""
     collect_args = {
         "itemSelectors": selectors.get("friend_item", []),
         "nameSelectors": selectors.get("friend_name", []),
@@ -104,11 +104,14 @@ async def collect_friends(
     }
 
     friends: Dict[str, Dict[str, str]] = {}
-    idle_rounds = 0
-    for round_index in range(max_scrolls):
+    loose_friends: Dict[str, Dict[str, str]] = {}
+
+    async def scan_once() -> int:
+        """扫描当前已渲染的好友，返回新增数量。"""
         data = await bridge.evaluate(build_script(COLLECT_BODY, collect_args))
         added = 0
-        for item in (data or {}).get("friends") or []:
+        payload = data if isinstance(data, dict) else {}
+        for item in payload.get("friends") or []:
             name = str(item.get("name") or "").strip()
             if not name:
                 continue
@@ -118,21 +121,49 @@ async def collect_friends(
                 added += 1
             elif avatar and not friends[name]["avatar"]:
                 friends[name]["avatar"] = avatar
+        for item in payload.get("loose") or []:
+            name = str(item.get("name") or "").strip()
+            if not name or JUNK_NAME_PATTERN.match(name):
+                continue
+            avatar = str(item.get("avatar") or "").strip()
+            if name not in loose_friends:
+                loose_friends[name] = {"name": name, "avatar": avatar}
+            elif avatar and not loose_friends[name]["avatar"]:
+                loose_friends[name]["avatar"] = avatar
+        return added
 
-        scroll = await bridge.evaluate(build_script(SCROLL_BODY, scroll_args))
-        await asyncio.sleep(1.2)
-        scroll = scroll if isinstance(scroll, dict) else {}
-        moved = int(scroll.get("after") or 0) > int(scroll.get("before") or 0)
-        at_bottom = bool(scroll.get("atBottom"))
+    async def one_pass(pass_index: int) -> None:
+        # 虚拟列表会复用节点，必须先回到顶部再逐段下滑，否则只能读到当前可视区域。
+        reset = await bridge.evaluate(build_script(RESET_BODY, scroll_args))
+        await asyncio.sleep(1.5)
+        if logger is not None and pass_index == 1 and not (isinstance(reset, dict) and reset.get("reset")):
+            logger.warning("没有找到好友列表的滚动容器，只能读取当前可见的好友")
 
-        if logger is not None and (round_index == 0 or added):
-            logger.info(f"好友列表扫描中：已收集 {len(friends)} 位好友")
+        idle_rounds = 0
+        for round_index in range(max_scrolls):
+            added = await scan_once()
+            scroll = await bridge.evaluate(build_script(SCROLL_BODY, scroll_args))
+            await asyncio.sleep(1.3)
+            scroll = scroll if isinstance(scroll, dict) else {}
+            moved = int(scroll.get("after") or 0) > int(scroll.get("before") or 0)
+            at_bottom = bool(scroll.get("atBottom"))
+            if logger is not None and (round_index == 0 or added):
+                logger.info(f"好友列表扫描中（第 {pass_index} 遍）：已收集 {len(friends)} 位好友")
+            if at_bottom and added == 0:
+                break
+            idle_rounds = 0 if (added or moved) else idle_rounds + 1
+            if idle_rounds >= 3:
+                break
+        await scan_once()
 
-        if at_bottom and added == 0:
-            break
-        idle_rounds = 0 if (added or moved) else idle_rounds + 1
-        if idle_rounds >= 3:
-            break
+    for pass_index in range(1, max(1, int(passes)) + 1):
+        await one_pass(pass_index)
+
+    if not friends and loose_friends:
+        # 页面结构变化导致找不到名字节点时，退回按整行首行提取。
+        friends = loose_friends
+        if logger is not None:
+            logger.warning("没有识别到标准好友名字节点，已按整行文本兜底提取")
 
     if logger is not None:
         logger.info(f"好友列表扫描完成，共 {len(friends)} 位好友")

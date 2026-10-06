@@ -190,15 +190,16 @@ class Application:
                 result.append(name)
         return result
 
-    async def scan_friends(self) -> List[Dict[str, Any]]:
+    async def scan_friends(self, cache: bool = True) -> List[Dict[str, Any]]:
         """读取完整好友列表（会滚动到底部）并缓存头像。"""
         await self._ensure_chat_page()
         await wait_for_chat_ready(self.browser)
         await click_friends_tab(self.browser, self.selectors, self.logger)
         friends = await collect_friends(self.browser, self.selectors, self.logger)
-        for item in friends:
-            item["avatarPath"] = cache_avatar(str(item.get("avatar") or ""), str(item.get("name") or ""))
-        write_cache(friends)
+        if cache:
+            for item in friends:
+                item["avatarPath"] = cache_avatar(str(item.get("avatar") or ""), str(item.get("name") or ""))
+            write_cache(friends)
         return friends
 
     async def _ensure_chat_page(self) -> None:

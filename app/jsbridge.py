@@ -38,6 +38,29 @@ const normalizeName = (value) => (value || '')
   .replace(/[\u200b\u200c\u200d\ufeff]/g, '')
   .replace(/\s+/g, ' ')
   .trim();
+const findScrollContainer = (scrollSelectors, itemSelector) => {
+  const isScrollable = (node) => {
+    if (!node) return false;
+    const style = getComputedStyle(node);
+    if (!/(auto|scroll)/.test(style.overflowY)) return false;
+    return node.scrollHeight > node.clientHeight + 40;
+  };
+  const candidates = [];
+  for (const selector of (scrollSelectors || [])) candidates.push(queryOne(selector));
+  const items = queryAll(itemSelector);
+  let node = items.length ? items[items.length - 1] : null;
+  while (node && node !== document.body && node !== document.documentElement) {
+    candidates.push(node);
+    node = node.parentElement;
+  }
+  for (const candidate of candidates) {
+    if (isScrollable(candidate)) return candidate;
+  }
+  for (const candidate of candidates) {
+    if (candidate && candidate.scrollHeight > candidate.clientHeight + 40) return candidate;
+  }
+  return null;
+};
 """
 
 

@@ -18,7 +18,8 @@ DEFAULT_SELECTORS: Dict[str, List[str]] = {
     ],
     "friends_tab_texts": ["朋友私信", "好友私信"],
     "friend_item": [
-        'xpath=//*[@id="sub-app"]//div[contains(@class,"semi-list-item-body")]',
+        'xpath=//*[@id="sub-app"]//div[contains(@class,"semi-list-item-body")'
+        ' and contains(@class,"semi-list-item-body-flex-start")]',
         'xpath=//*[@id="sub-app"]//li[contains(@class,"semi-list-item")]',
         'xpath=//*[@id="sub-app"]//div[contains(@class,"item-header-name")]',
     ],
@@ -27,6 +28,7 @@ DEFAULT_SELECTORS: Dict[str, List[str]] = {
         '[class*="item-header-name"]',
     ],
     "friend_list_scroll": [
+        'xpath=//*[@id="sub-app"]//div[contains(@class,"ReactVirtualized__Grid")]',
         'xpath=//*[@id="sub-app"]//ul',
     ],
     "chat_input": [

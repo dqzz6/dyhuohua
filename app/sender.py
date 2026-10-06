@@ -265,25 +265,11 @@ return { clicked: true };
 """
 
 SCROLL_LIST_BODY = r"""
-const applyScroll = (node) => {
-  if (!node) return false;
-  const before = node.scrollTop;
-  node.scrollTop = before + 600;
-  return node.scrollTop > before;
-};
-for (const selector of A.scrollSelectors) {
-  const node = queryOne(selector);
-  if (applyScroll(node)) return { scrolled: true };
-}
-const items = queryAll(A.itemSelector);
-let node = items.length ? items[items.length - 1] : null;
-while (node && node !== document.body && node !== document.documentElement) {
-  const style = getComputedStyle(node);
-  const scrollable = /(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 40;
-  if (scrollable) return { scrolled: applyScroll(node) };
-  node = node.parentElement;
-}
-return { scrolled: false };
+const target = findScrollContainer(A.scrollSelectors, A.itemSelector);
+if (!target) return { scrolled: false };
+const before = target.scrollTop;
+target.scrollTop = before + 600;
+return { scrolled: target.scrollTop > before };
 """
 
 
