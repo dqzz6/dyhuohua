@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.config import normalize_config, normalize_time  # noqa: E402
 from app.friends import extract_user_details, merge_friends, normalize_key  # noqa: E402
 from app.gui import filter_friend_names, order_selected_names  # noqa: E402
+from app.message import RANDOM_LINE, WHOLE, pick_message, split_candidates  # noqa: E402
 from app.logger import BEIJING  # noqa: E402
 from app.scheduler import DailyScheduler, scheduled_at  # noqa: E402
 from app.sender import SendError, name_matches, normalize_text, send_message  # noqa: E402
@@ -98,6 +99,30 @@ def test_friend_search_and_selection_order() -> None:
     assert order_selected_names(friends, {"小明明", "凡宝"}) == ["凡宝", "小明明"]
     assert order_selected_names(friends, {"凡宝", "已消失的好友"}) == ["凡宝", "已消失的好友"]
     assert order_selected_names(friends, set()) == []
+
+
+def test_message_candidates() -> None:
+    assert split_candidates("第一行\n\n 第二行 \n第一行\r\n第三行") == ["第一行", "第二行", "第三行"]
+    assert split_candidates("") == []
+
+
+def test_pick_message_modes() -> None:
+    text = "第一条\n第二条\n第三条"
+    assert pick_message(text, WHOLE) == text
+    assert pick_message("  单独的 内容  ", WHOLE) == "单独的 内容"
+
+    for _ in range(20):
+        assert pick_message(text, RANDOM_LINE) in {"第一条", "第二条", "第三条"}
+    assert pick_message(text, RANDOM_LINE, avoid="第一条") in {"第二条", "第三条"}
+    assert pick_message("唯一一条", RANDOM_LINE, avoid="唯一一条") == "唯一一条"
+    assert pick_message("  \n  ", RANDOM_LINE) == ""
+    assert pick_message("", WHOLE) == ""
+
+
+def test_message_mode_config() -> None:
+    assert normalize_config({})["message_mode"] == "whole"
+    assert normalize_config({"message_mode": "random_line"})["message_mode"] == "random_line"
+    assert normalize_config({"message_mode": "乱填"})["message_mode"] == "whole"
 
 
 def test_name_matching() -> None:

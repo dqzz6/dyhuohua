@@ -15,6 +15,7 @@ TIME_PATTERN = re.compile(r"^(\d{1,2}):(\d{1,2})$")
 DEFAULT_CONFIG: Dict[str, Any] = {
     "target_names": [],
     "message": "续火花",
+    "message_mode": "whole",
     "send_time": "09:00",
     "daily_enabled": True,
     "missed_run": False,
@@ -55,6 +56,7 @@ def normalize_config(raw: Dict[str, Any]) -> Dict[str, Any]:
     merged["send_time"] = normalize_time(merged.get("send_time"))
     merged["target_names"] = _normalize_target_names(source.get("target_names"), source.get("target_name"))
     merged["message"] = str(merged.get("message") or "").strip()
+    merged["message_mode"] = "random_line" if str(merged.get("message_mode")) == "random_line" else "whole"
     merged["match_mode"] = "contains" if str(merged.get("match_mode")) == "contains" else "equals"
     merged["daily_enabled"] = bool(merged.get("daily_enabled"))
     merged["missed_run"] = bool(merged.get("missed_run"))

@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .config import normalize_config, normalize_time
 from .logger import BEIJING
+from .message import pick_message, split_candidates
 from .scheduler import DailyScheduler, scheduled_at
 from .sender import name_matches, normalize_text
 from .state import SendStore
@@ -56,6 +57,14 @@ def _check_matching() -> None:
 def _check_schedule() -> None:
     now = datetime(2026, 10, 6, 8, 0, tzinfo=BEIJING)
     _check(scheduled_at(now, "09:30") == now.replace(hour=9, minute=30), "计划时间计算失败")
+
+
+def _check_message() -> None:
+    text = "第一条\n第二条"
+    _check(split_candidates("第一条\n\n 第二条 \n第一条") == ["第一条", "第二条"], "候选拆分失败")
+    _check(pick_message(text, "whole") == text, "整条发送失败")
+    _check(pick_message(text, "random_line", avoid="第一条") == "第二条", "随机抽行未避开上次内容")
+    _check(pick_message(text, "random_line") in {"第一条", "第二条"}, "随机抽行取值异常")
 
 
 def _check_store() -> None:
@@ -287,6 +296,8 @@ def run_selftest(include_browser: bool = False) -> int:
     print("好友名匹配：通过")
     _check_schedule()
     print("定时时间计算：通过")
+    _check_message()
+    print("消息发送方式：通过")
     _check_store()
     print("发送记录幂等：通过")
     _check_scheduler()

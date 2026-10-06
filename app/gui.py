@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QRadioButton,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -31,6 +32,7 @@ from PySide6.QtWidgets import (
 from .embedded import EmbeddedBrowser
 from .friends import normalize_key, read_cache
 from .logger import recent_lines
+from .message import split_candidates
 from .paths import DATA_DIR
 from .service import Application
 
@@ -81,8 +83,8 @@ class MainWindow(QMainWindow):
         self._selected_names = set()
 
         self.setWindowTitle("抖音自动消息")
-        self.resize(1480, 940)
-        self.setMinimumSize(1150, 780)
+        self.resize(1480, 980)
+        self.setMinimumSize(1150, 820)
 
         self._build_widgets()
         self._load_form()
@@ -152,15 +154,30 @@ class MainWindow(QMainWindow):
         self.check_daily = QCheckBox("每天定时发送")
         self.check_missed = QCheckBox("错过时间后不限时补发")
         self.input_message = QPlainTextEdit()
-        self.input_message.setFixedHeight(72)
+        self.input_message.setFixedHeight(78)
+        self.radio_random = QRadioButton("随机抽一行")
+        self.radio_whole = QRadioButton("整条发送")
+        self.label_message_hint = QLabel("")
+        self.label_message_hint.setWordWrap(True)
+
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(self.radio_random)
+        mode_row.addWidget(self.radio_whole)
+        mode_row.addStretch(1)
+        mode_box = QVBoxLayout()
+        mode_box.setSpacing(2)
+        mode_box.addLayout(mode_row)
+        mode_box.addWidget(self.label_message_hint)
 
         grid.addWidget(QLabel("发送时间"), 0, 0)
         grid.addWidget(self.input_time, 0, 1)
         grid.addWidget(QLabel("HH:MM（北京时间）"), 0, 2)
         grid.addWidget(self.check_daily, 1, 1, 1, 2)
         grid.addWidget(self.check_missed, 2, 1, 1, 2)
-        grid.addWidget(QLabel("消息内容"), 3, 0, Qt.AlignmentFlag.AlignTop)
-        grid.addWidget(self.input_message, 3, 1, 1, 2)
+        grid.addWidget(QLabel("发送方式"), 3, 0, Qt.AlignmentFlag.AlignTop)
+        grid.addLayout(mode_box, 3, 1, 1, 2)
+        grid.addWidget(QLabel("消息内容"), 4, 0, Qt.AlignmentFlag.AlignTop)
+        grid.addWidget(self.input_message, 4, 1, 1, 2)
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(2, 1)
         return group
@@ -237,6 +254,8 @@ class MainWindow(QMainWindow):
         self.input_search.returnPressed.connect(self._quick_select)
         self.list_friends.itemChanged.connect(self._on_friend_item_changed)
         self.list_selected.itemDoubleClicked.connect(self._remove_selected_item)
+        self.radio_random.toggled.connect(self._update_message_hint)
+        self.input_message.textChanged.connect(self._update_message_hint)
         self.send_finished.connect(self._on_send_finished)
         self.friends_ready.connect(self._on_friends_ready)
 
@@ -247,7 +266,23 @@ class MainWindow(QMainWindow):
         self.check_daily.setChecked(bool(config.get("daily_enabled")))
         self.check_missed.setChecked(bool(config.get("missed_run")))
         self.input_message.setPlainText(str(config.get("message") or ""))
+        if str(config.get("message_mode")) == "random_line":
+            self.radio_random.setChecked(True)
+        else:
+            self.radio_whole.setChecked(True)
+        self._update_message_hint()
         self._selected_names = {str(name) for name in (config.get("target_names") or [])}
+
+    def _update_message_hint(self) -> None:
+        text = self.input_message.toPlainText()
+        if self.radio_random.isChecked():
+            count = len(split_candidates(text))
+            self.label_message_hint.setText(
+                f"当前 {count} 条候选，每次随机抽一条发送（会尽量避开上次发过的那条）"
+            )
+        else:
+            lines = len([line for line in text.splitlines() if line.strip()])
+            self.label_message_hint.setText(f"当前 {lines} 行，会作为一条消息整体发出")
 
     def _load_cached_friends(self) -> None:
         cached = read_cache()
@@ -389,6 +424,7 @@ class MainWindow(QMainWindow):
                 {
                     "target_names": names,
                     "message": self.input_message.toPlainText().strip(),
+                    "message_mode": "random_line" if self.radio_random.isChecked() else "whole",
                     "send_time": self.input_time.text().strip(),
                     "daily_enabled": self.check_daily.isChecked(),
                     "missed_run": self.check_missed.isChecked(),

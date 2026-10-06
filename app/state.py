@@ -97,6 +97,19 @@ class SendStore:
     def pending_targets(self, date_key: str, targets: List[str]) -> List[str]:
         return [name for name in targets if not self.is_success(date_key, name)]
 
+    def last_sent_message(self, target: str) -> str:
+        """往上找这位好友最近一次成功发送的内容，随机抽一行时用来避开重复。"""
+        with self._lock:
+            data = self._read()
+        for date_key in sorted(data.keys(), reverse=True):
+            day = data.get(date_key)
+            if not isinstance(day, dict):
+                continue
+            entry = day.get(str(target))
+            if isinstance(entry, dict) and str(entry.get("status") or "") == "success":
+                return str(entry.get("message") or "")
+        return ""
+
     def history(self, limit: int = 30) -> List[Dict[str, Any]]:
         with self._lock:
             data = self._read()

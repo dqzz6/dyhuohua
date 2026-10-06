@@ -23,6 +23,7 @@ from .friends import (
     write_cache,
 )
 from .logger import BEIJING, setup_logger
+from .message import normalize_mode, pick_message
 from .network import NetworkCapture
 from .paths import LOG_DIR, RUNTIME_PATH, ensure_dirs
 from .scheduler import DailyScheduler
@@ -271,6 +272,7 @@ class Application:
         async with self._send_lock:
             names = self._resolve_targets(targets)
             content = (message or self.config.get("message") or "").strip()
+            message_mode = normalize_mode(self.config.get("message_mode"))
             timeout_seconds = int(self.config.get("send_timeout_seconds") or 120)
             if not names:
                 detail = "没有可发送的好友，请先读取好友列表并勾选"
@@ -279,7 +281,8 @@ class Application:
                 self._last_result = payload
                 return payload
 
-            self.logger.info(f"开始发送（{reason}）：共 {len(names)} 位好友")
+            mode_label = "随机抽一行" if message_mode == "random_line" else "整条发送"
+            self.logger.info(f"开始发送（{reason}）：共 {len(names)} 位好友，发送方式：{mode_label}")
             await self._ensure_chat_page()
 
             results: List[Dict[str, Any]] = []
@@ -288,13 +291,19 @@ class Application:
                 today = self.store.today_key()
                 if not force and self.store.is_success(today, name):
                     continue
-                self.logger.info(f"[{index}/{len(names)}] 正在给「{name}」发送消息")
+                sent_message = pick_message(content, message_mode, self.store.last_sent_message(name))
+                if not sent_message:
+                    results.append(self._failure("empty_message", "消息内容为空", name, content, reason))
+                    continue
+                self.logger.info(
+                    f"[{index}/{len(names)}] 正在给「{name}」发送消息：{sent_message[:30]}"
+                )
                 try:
                     result = await asyncio.wait_for(
                         send_message(
                             self.browser,
                             name,
-                            content,
+                            sent_message,
                             self.selectors,
                             self.logger,
                             match_mode=str(self.config.get("match_mode") or "equals"),
@@ -303,21 +312,21 @@ class Application:
                         timeout=timeout_seconds,
                     )
                 except LoginRequiredError as exc:
-                    results.append(self._failure("login_required", str(exc), name, content, reason))
+                    results.append(self._failure("login_required", str(exc), name, sent_message, reason))
                     stopped_early = True
                     break
                 except SendError as exc:
-                    results.append(self._failure("send_failed", str(exc), name, content, reason))
+                    results.append(self._failure("send_failed", str(exc), name, sent_message, reason))
                 except asyncio.TimeoutError:
                     results.append(
-                        self._failure("timeout", f"发送超时（{timeout_seconds} 秒）", name, content, reason)
+                        self._failure("timeout", f"发送超时（{timeout_seconds} 秒）", name, sent_message, reason)
                     )
                 except Exception as exc:
-                    results.append(self._failure(type(exc).__name__, str(exc), name, content, reason))
+                    results.append(self._failure(type(exc).__name__, str(exc), name, sent_message, reason))
                 else:
                     detail = str(result.get("detail") or "")
-                    self.store.record("success", name, content, detail, reason)
-                    results.append({"ok": True, "target": name, "detail": detail})
+                    self.store.record("success", name, sent_message, detail, reason)
+                    results.append({"ok": True, "target": name, "detail": detail, "message": sent_message})
                     self.logger.info(f"「{name}」发送成功：{detail}")
                 await asyncio.sleep(1.0)
 
