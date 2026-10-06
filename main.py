@@ -3,7 +3,31 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+import urllib.request
+
+from app.paths import RUNTIME_PATH
+
+
+def already_running_url(timeout: float = 2.0):
+    """如果已经有一个实例在运行，返回它的控制接口地址。"""
+    try:
+        info = json.loads(RUNTIME_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    url = str(info.get("control_api") or "").strip()
+    token = str(info.get("token") or "").strip()
+    if not url or not token:
+        return None
+    try:
+        request = urllib.request.Request(url + "/status", headers={"X-Douyin-Token": token})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if response.status == 200:
+                return url
+    except Exception:
+        return None
+    return None
 
 
 def parse_args(argv=None):
@@ -21,6 +45,19 @@ def main(argv=None) -> int:
         from app.selftest import run_selftest
 
         return run_selftest(include_browser=args.selftest_browser)
+
+    running_url = already_running_url()
+    if running_url:
+        message = f"程序已经在运行了，不用重复打开。\n控制接口：{running_url}"
+        print(message)
+        try:
+            from PySide6.QtWidgets import QApplication, QMessageBox
+
+            app = QApplication.instance() or QApplication(sys.argv[:1])
+            QMessageBox.information(None, "提示", message)
+        except Exception:
+            pass
+        return 0
 
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
