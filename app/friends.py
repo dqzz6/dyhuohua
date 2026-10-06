@@ -18,6 +18,96 @@ from .paths import AVATAR_DIR, FRIENDS_CACHE_PATH
 AVATAR_TIMEOUT = 10
 AVATAR_MAX_BYTES = 3 * 1024 * 1024
 JUNK_NAME_PATTERN = re.compile(r"^(\d+|\d{1,2}:\d{2}.*)$")
+USER_DETAIL_URL_MARK = "/aweme/v1/creator/im/user_detail/"
+AVATAR_FIELDS = ("avatar_thumb", "avatar_168x168", "avatar_300x300", "avatar_larger", "avatar_medium")
+
+
+def normalize_key(value: Any) -> str:
+    """用于比对的名字归一化：全角转半角、去掉零宽字符与空白。"""
+    import unicodedata
+
+    raw = unicodedata.normalize("NFKC", str(value or ""))
+    for token in ("\u200b", "\u200c", "\u200d", "\ufeff"):
+        raw = raw.replace(token, "")
+    return "".join(raw.split()).strip().lower()
+
+
+def _pick_avatar(user: Dict[str, Any]) -> str:
+    for field in AVATAR_FIELDS:
+        node = user.get(field)
+        if not isinstance(node, dict):
+            continue
+        urls = node.get("url_list") or []
+        if urls:
+            return str(urls[0])
+    return ""
+
+
+def extract_user_details(payloads: List[Any]) -> List[Dict[str, str]]:
+    """从 user_detail 接口数据里提取好友昵称与头像，按用户ID去重。"""
+    result: List[Dict[str, str]] = []
+    seen: set = set()
+    for payload in payloads or []:
+        if not isinstance(payload, dict):
+            continue
+        for item in payload.get("user_list") or []:
+            if not isinstance(item, dict):
+                continue
+            user = item.get("user")
+            if not isinstance(user, dict):
+                continue
+            nickname = str(user.get("nickname") or "").strip()
+            if not nickname:
+                continue
+            user_id = str(
+                item.get("user_id") or user.get("SecretUseId") or user.get("uid") or ""
+            ).strip()
+            key = user_id or normalize_key(nickname)
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append({"userId": user_id, "name": nickname, "avatar": _pick_avatar(user)})
+    return result
+
+
+def merge_friends(
+    dom_friends: List[Dict[str, Any]],
+    details: List[Dict[str, str]],
+) -> List[Dict[str, str]]:
+    """以接口昵称与头像为准，按页面顺序输出，去掉重复与无效名字。"""
+    by_name: Dict[str, Dict[str, str]] = {}
+    for detail in details:
+        key = normalize_key(detail.get("name"))
+        if key and key not in by_name:
+            by_name[key] = detail
+
+    merged: List[Dict[str, str]] = []
+    used: set = set()
+
+    def push(detail: Dict[str, Any], source: str) -> None:
+        name = str(detail.get("name") or "").strip()
+        if not name:
+            return
+        identity = str(detail.get("userId") or normalize_key(name))
+        if identity in used:
+            return
+        used.add(identity)
+        merged.append(
+            {
+                "name": name,
+                "avatar": str(detail.get("avatar") or ""),
+                "userId": str(detail.get("userId") or ""),
+                "source": source,
+            }
+        )
+
+    for item in dom_friends:
+        detail = by_name.get(normalize_key(item.get("name")))
+        if detail:
+            push(detail, "页面+接口")
+    for detail in details:
+        push(detail, "接口")
+    return merged
 
 COLLECT_BODY = r"""
 const strictNameOf = (node) => {

@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import normalize_config, normalize_time  # noqa: E402
+from app.friends import extract_user_details, merge_friends, normalize_key  # noqa: E402
 from app.logger import BEIJING  # noqa: E402
 from app.scheduler import DailyScheduler, scheduled_at  # noqa: E402
 from app.sender import SendError, name_matches, normalize_text, send_message  # noqa: E402
@@ -42,6 +43,42 @@ def test_normalize_config() -> None:
 def test_target_names_migration_and_dedup() -> None:
     assert normalize_config({"target_name": "旧版好友"})["target_names"] == ["旧版好友"]
     assert normalize_config({"target_names": ["小明", "小明", " 小红 ", ""]})["target_names"] == ["小明", "小红"]
+
+
+def test_friend_details_from_api() -> None:
+    payloads = [
+        {
+            "user_list": [
+                {"user_id": "u1", "user": {"nickname": "小明", "avatar_thumb": {"url_list": ["https://a/1.jpg"]}}},
+                {"user_id": "u2", "user": {"SecretUseId": "u2", "nickname": "小红", "avatar_thumb": {"url_list": ["https://a/2.jpg"]}}},
+            ]
+        },
+        {"user_list": [{"user_id": "u1", "user": {"nickname": "小明", "avatar_thumb": {"url_list": ["https://a/1.jpg"]}}}]},
+        {"user_list": [{"user_id": "u3", "user": {"nickname": ""}}]},
+    ]
+    details = extract_user_details(payloads)
+    assert [item["name"] for item in details] == ["小明", "小红"]
+    assert details[0]["avatar"].endswith("1.jpg")
+    assert details[1]["userId"] == "u2"
+
+
+def test_merge_friends_removes_noise() -> None:
+    details = [
+        {"userId": "u1", "name": "小明", "avatar": "https://a/1.jpg"},
+        {"userId": "u2", "name": "小红", "avatar": "https://a/2.jpg"},
+    ]
+    dom = [
+        {"name": "20"},
+        {"name": "小明"},
+        {"name": "小明"},
+        {"name": "00:57小红,你好"},
+        {"name": "小红"},
+    ]
+    merged = merge_friends(dom, details)
+    assert [item["name"] for item in merged] == ["小明", "小红"]
+    assert all(item["userId"] for item in merged)
+    assert merge_friends(dom, []) == []
+    assert normalize_key("Ａ Ｂ\u200b") == "ab"
 
 
 def test_name_matching() -> None:

@@ -14,8 +14,16 @@ from typing import Any, Coroutine, Dict, List, Optional
 from .browser import BrowserBridge
 from .config import load_config, save_config
 from .control_api import ControlServer
-from .friends import cache_avatar, collect_friends, write_cache
+from .friends import (
+    USER_DETAIL_URL_MARK,
+    cache_avatar,
+    collect_friends,
+    extract_user_details,
+    merge_friends,
+    write_cache,
+)
 from .logger import BEIJING, setup_logger
+from .network import NetworkCapture
 from .paths import LOG_DIR, RUNTIME_PATH, ensure_dirs
 from .scheduler import DailyScheduler
 from .selectors import load_selectors
@@ -65,6 +73,7 @@ class Application:
         self.config: Dict[str, Any] = load_config()
         self.selectors = load_selectors()
         self.browser = BrowserBridge(debug_port, logger=self.logger)
+        self.network = NetworkCapture(self.browser.cdp, logger=self.logger)
         self.scheduler = DailyScheduler(self.config_snapshot, self._scheduled_run, self.store, self.logger)
         self.worker = _AsyncWorker()
         self.control: Optional[ControlServer] = None
@@ -87,6 +96,7 @@ class Application:
         self._send_lock = asyncio.Lock()
         try:
             await self.browser.start()
+            await self.network.start()
         except Exception as exc:
             self.logger.error(f"接管内置浏览器失败：{exc}")
         self.scheduler.start()
@@ -190,17 +200,51 @@ class Application:
                 result.append(name)
         return result
 
-    async def scan_friends(self, cache: bool = True) -> List[Dict[str, Any]]:
-        """读取完整好友列表（会滚动到底部）并缓存头像。"""
-        await self._ensure_chat_page()
+    async def scan_friends(self, cache: bool = True, reload: bool = True) -> List[Dict[str, Any]]:
+        """读取完整好友列表：页面滚动定位 + 接口数据校准昵称与头像。"""
+        # 先重新加载私信页，清掉前端缓存，保证每位好友的详情接口都会重新请求一次。
+        self.network.clear()
+        if reload:
+            try:
+                await self.browser.goto(self.start_url())
+            except Exception as exc:
+                self.logger.warning(f"重新加载私信页失败：{exc}")
+            await asyncio.sleep(2)
         await wait_for_chat_ready(self.browser)
         await click_friends_tab(self.browser, self.selectors, self.logger)
-        friends = await collect_friends(self.browser, self.selectors, self.logger)
+        dom_friends = await collect_friends(self.browser, self.selectors, self.logger)
+        details = extract_user_details(self.network.payloads_for(USER_DETAIL_URL_MARK))
+        if details:
+            friends = merge_friends(dom_friends, details)
+            self.logger.info(
+                f"已结合接口数据校准好友列表：页面 {len(dom_friends)} 条，接口 {len(details)} 位，最终 {len(friends)} 位"
+            )
+            if len(details) * 2 < len(dom_friends):
+                self.logger.warning("接口数据少于页面条目，列表可能不完整，可再点一次「读取好友列表」")
+        else:
+            friends = dom_friends
+            self.logger.warning("这次没有抓到好友详情接口，已按页面文本识别，可能有重复项")
         if cache:
             for item in friends:
                 item["avatarPath"] = cache_avatar(str(item.get("avatar") or ""), str(item.get("name") or ""))
             write_cache(friends)
         return friends
+
+    # ---------- 接口抓包（联调排查用） ----------
+    def capture_summary(self, keyword: str = "", limit: int = 50) -> List[Dict[str, Any]]:
+        return self.network.summary(keyword, limit)
+
+    def capture_body(self, index: int, limit: int = 4000) -> Optional[str]:
+        return self.network.body(index, limit)
+
+    def capture_clear(self) -> Dict[str, Any]:
+        self.network.clear()
+        return {"cleared": True}
+
+    async def capture_reload(self) -> Dict[str, Any]:
+        page_url = await self.browser.evaluate("location.href")
+        await self.browser.goto(str(page_url))
+        return {"url": page_url}
 
     async def _ensure_chat_page(self) -> None:
         # 页面可能还在加载，先给几次机会，避免把已经打开的私信页重新导航掉。

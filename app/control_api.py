@@ -141,6 +141,17 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, "data": data})
             elif method == "POST" and path == "/friends":
                 self._send_json({"ok": True, "data": self._run(app.scan_friends(), 600)})
+            elif method == "GET" and path == "/capture":
+                keyword = str((params.get("keyword", [""])[0]) or "")
+                limit = int((params.get("limit", ["50"])[0]) or 50)
+                self._send_json({"ok": True, "data": app.capture_summary(keyword, limit)})
+            elif method == "POST" and path == "/capture/body":
+                body_text = app.capture_body(int(body.get("index") or 0), int(body.get("limit") or 4000))
+                self._send_json({"ok": True, "data": body_text})
+            elif method == "POST" and path == "/capture/clear":
+                self._send_json({"ok": True, "data": app.capture_clear()})
+            elif method == "POST" and path == "/capture/reload":
+                self._send_json({"ok": True, "data": self._run(app.capture_reload(), 120)})
             elif method == "GET" and path == "/history":
                 self._send_json({"ok": True, "data": app.store.history(50)})
             else:

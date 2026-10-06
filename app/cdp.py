@@ -1,7 +1,8 @@
-"""轻量 CDP 客户端：通过 WebSocket 直连内置浏览器的调试端口。
+"""轻量 CDP 客户端：通过 WebSocket 直连内置浏览器调试端口。
 
-内置浏览器（QtWebEngine）会暴露一个标准 Chrome DevTools 调试端口，
-这里只用其中稳定的几个域：Runtime、Input、Page、Target。
+同时支持两类用法：
+1. 请求/响应：Runtime.evaluate、Input.*、Page.captureScreenshot 等；
+2. 事件订阅：Network.responseReceived 等，用来直接看抖音接口返回的数据。
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ import asyncio
 import base64
 import json
 import urllib.request
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import websockets
 
@@ -30,7 +31,7 @@ class CdpError(RuntimeError):
 
 
 class CdpClient:
-    """串行化使用一条 WebSocket 连接，所有调用都在同一事件循环里。"""
+    """一条 WebSocket 连接上串行发请求、并行收事件，全部在同一事件循环里。"""
 
     def __init__(self, port: int, logger=None, host: str = "127.0.0.1"):
         self._port = int(port)
@@ -40,6 +41,9 @@ class CdpClient:
         self._session_id: Optional[str] = None
         self._counter = 0
         self._lock = asyncio.Lock()
+        self._pending: Dict[int, asyncio.Future] = {}
+        self._listeners: Dict[str, List[Callable[[Dict[str, Any]], Any]]] = {}
+        self._reader: Optional[asyncio.Task] = None
 
     @property
     def endpoint(self) -> str:
@@ -49,9 +53,56 @@ class CdpClient:
     def connected(self) -> bool:
         return self._ws is not None and bool(self._session_id)
 
+    @property
+    def session_id(self) -> Optional[str]:
+        return self._session_id
+
     def _log(self, message: str) -> None:
         if self._logger is not None:
             self._logger.info(message)
+
+    # ---------- 事件订阅 ----------
+    def add_listener(self, method: str, callback: Callable[[Dict[str, Any]], Any]) -> None:
+        self._listeners.setdefault(method, []).append(callback)
+
+    def remove_listener(self, method: str, callback: Callable[[Dict[str, Any]], Any]) -> None:
+        handlers = self._listeners.get(method) or []
+        if callback in handlers:
+            handlers.remove(callback)
+
+    async def _reader_loop(self) -> None:
+        ws = self._ws
+        try:
+            while ws is not None:
+                raw = await ws.recv()
+                try:
+                    data = json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                if "id" in data:
+                    future = self._pending.pop(data["id"], None)
+                    if future is not None and not future.done():
+                        future.set_result(data)
+                    continue
+                method = str(data.get("method") or "")
+                if not method:
+                    continue
+                params = data.get("params")
+                for callback in list(self._listeners.get(method, ())):
+                    try:
+                        result = callback(params if isinstance(params, dict) else {})
+                        if asyncio.iscoroutine(result):
+                            asyncio.create_task(result)
+                    except Exception:
+                        continue
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # 连接断开时让后续请求感知到
+            self._ws = None
+            self._session_id = None
 
     # ---------- 连接管理 ----------
     async def connect(self, timeout: float = 40.0) -> None:
@@ -72,6 +123,7 @@ class CdpClient:
                 if not ws_url:
                     raise CdpError("调试端口没有返回 WebSocket 地址")
                 self._ws = await websockets.connect(ws_url, max_size=None, open_timeout=15)
+                self._reader = asyncio.create_task(self._reader_loop())
                 self._session_id = await self._attach_page()
                 self._log("已接管内置浏览器页面")
                 return
@@ -100,9 +152,17 @@ class CdpClient:
         return session_id
 
     async def _drop_connection(self) -> None:
+        reader = self._reader
+        self._reader = None
+        if reader is not None and not reader.done():
+            reader.cancel()
         ws = self._ws
         self._ws = None
         self._session_id = None
+        for future in list(self._pending.values()):
+            if not future.done():
+                future.set_exception(CdpError("内置浏览器连接已断开"))
+        self._pending.clear()
         if ws is not None:
             try:
                 await ws.close()
@@ -128,17 +188,23 @@ class CdpClient:
         payload: Dict[str, Any] = {"id": message_id, "method": method, "params": params or {}}
         if session:
             payload["sessionId"] = session
-        await self._ws.send(json.dumps(payload, ensure_ascii=False))
-        while True:
-            raw = await asyncio.wait_for(self._ws.recv(), timeout=timeout)
-            data = json.loads(raw)
-            if data.get("id") != message_id:
-                continue
-            if "error" in data:
-                error = data.get("error") or {}
-                raise CdpError(f"{method} 调用失败：{error.get('message')}")
-            result = data.get("result")
-            return result if isinstance(result, dict) else {}
+
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[message_id] = future
+        try:
+            await self._ws.send(json.dumps(payload, ensure_ascii=False))
+            data = await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            self._pending.pop(message_id, None)
+            raise CdpError(f"{method} 调用超时") from exc
+        finally:
+            self._pending.pop(message_id, None)
+
+        if "error" in data:
+            error = data.get("error") or {}
+            raise CdpError(f"{method} 调用失败：{error.get('message')}")
+        result = data.get("result")
+        return result if isinstance(result, dict) else {}
 
     async def send(self, method: str, params: Optional[Dict[str, Any]] = None, timeout: float = 25.0) -> Dict[str, Any]:
         """对外统一入口：自动带上页面会话，失败后标记断线以便重连。"""

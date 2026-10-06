@@ -242,7 +242,7 @@ def _check_embedded_flow() -> None:
                     "query": await application.query_selector(".item", 5),
                     "screenshot": await application.take_screenshot(False),
                     "html": await application.page_html(0),
-                    "friends": await application.scan_friends(cache=False),
+                    "friends": await application.scan_friends(cache=False, reload=False),
                 }
 
             outcome["probes"] = application.submit(probes()).result(timeout=90)
