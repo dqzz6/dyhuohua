@@ -209,6 +209,10 @@ QTabBar::tab:selected {
 QTabBar::tab:hover:!selected {
     background: #eaf2f8;
 }
+QTabWidget#settingsTabs QTabBar::tab {
+    min-width: 0;
+    padding: 7px 10px;
+}
 """
 
 
@@ -307,17 +311,30 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        layout.addWidget(self._build_status_group())
-
         tabs = QTabWidget()
-        tabs.setObjectName("mainTabs")
+        tabs.setObjectName("settingsTabs")
+        tabs.setDocumentMode(True)
+
+        status_tab = QWidget()
+        status_layout = QVBoxLayout(status_tab)
+        status_layout.setContentsMargins(0, 6, 0, 0)
+        status_layout.addWidget(self._build_status_group())
+        status_layout.addStretch(1)
+        tabs.addTab(status_tab, "运行状态")
+
         message_tab = QWidget()
         message_layout = QVBoxLayout(message_tab)
         message_layout.setContentsMargins(0, 6, 0, 0)
         message_layout.setSpacing(10)
         message_layout.addWidget(self._build_settings_group())
-        message_layout.addWidget(self._build_friends_group(), 1)
-        tabs.addTab(message_tab, "自动消息")
+        message_layout.addStretch(1)
+        tabs.addTab(message_tab, "消息设置")
+
+        friends_tab = QWidget()
+        friends_layout = QVBoxLayout(friends_tab)
+        friends_layout.setContentsMargins(0, 6, 0, 0)
+        friends_layout.addWidget(self._build_friends_group(), 1)
+        tabs.addTab(friends_tab, "好友选择")
 
         badge_tab = QWidget()
         badge_layout = QVBoxLayout(badge_tab)
@@ -327,9 +344,14 @@ class MainWindow(QMainWindow):
         badge_layout.addStretch(1)
         tabs.addTab(badge_tab, "自动续灯牌")
 
+        log_tab = QWidget()
+        log_layout = QVBoxLayout(log_tab)
+        log_layout.setContentsMargins(0, 6, 0, 0)
+        log_layout.addWidget(self._build_log_group(), 1)
+        tabs.addTab(log_tab, "运行日志")
+
         layout.addWidget(tabs, 5)
         layout.addLayout(self._build_buttons())
-        layout.addWidget(self._build_log_group(), 2)
         return panel
 
     def _build_status_group(self) -> QGroupBox:
