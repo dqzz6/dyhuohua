@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import socket
 from pathlib import Path
+from typing import Optional
 
 from PySide6.QtWebEngineCore import (
     QWebEnginePage,
@@ -35,6 +36,24 @@ def prepare_debug_port() -> int:
     return port
 
 
+def create_web_profile(
+    profile_dir: Path,
+    profile_name: str,
+    parent=None,
+) -> QWebEngineProfile:
+    """创建共享的持久化浏览器配置，不创建页面，因此不会启动渲染进程。"""
+    profile_dir = Path(profile_dir)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    profile = QWebEngineProfile(str(profile_name), parent)
+    profile.setPersistentStoragePath(str(profile_dir))
+    profile.setCachePath(str(profile_dir / "缓存"))
+    profile.setPersistentCookiesPolicy(
+        QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies
+    )
+    profile.setHttpUserAgent(USER_AGENT)
+    return profile
+
+
 class EmbeddedBrowser(QWebEngineView):
     """软件窗口内的浏览器视图，登录状态保存在 data/browser-profile。"""
 
@@ -44,10 +63,14 @@ class EmbeddedBrowser(QWebEngineView):
         parent=None,
         *,
         profile_name: str = "抖音自动消息",
-        profile: QWebEngineProfile = None,
+        profile: Optional[QWebEngineProfile] = None,
     ):
         super().__init__(parent)
-        self._profile = profile or self._create_profile(Path(profile_dir), profile_name)
+        self._profile = profile or create_web_profile(
+            Path(profile_dir),
+            profile_name,
+            self,
+        )
         self._page = QWebEnginePage(self._profile, self)
         self.setPage(self._page)
         self._enable_features()
@@ -55,17 +78,6 @@ class EmbeddedBrowser(QWebEngineView):
     @property
     def profile(self) -> QWebEngineProfile:
         return self._profile
-
-    def _create_profile(self, profile_dir: Path, profile_name: str) -> QWebEngineProfile:
-        profile_dir.mkdir(parents=True, exist_ok=True)
-        profile = QWebEngineProfile(str(profile_name), self)
-        profile.setPersistentStoragePath(str(profile_dir))
-        profile.setCachePath(str(profile_dir / "缓存"))
-        profile.setPersistentCookiesPolicy(
-            QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies
-        )
-        profile.setHttpUserAgent(USER_AGENT)
-        return profile
 
     def _enable_features(self) -> None:
         settings = self._page.settings()

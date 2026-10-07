@@ -34,6 +34,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "headless": False,
     "control_api_port": DEFAULT_INSTANCE_CONTROL_PORT,
     "send_timeout_seconds": 120,
+    "chat_browser_lazy": True,
     "live_browser_enabled": False,
     "badge_renewal_enabled": False,
     "badge_live_urls": [],
@@ -87,6 +88,7 @@ def normalize_config(raw: Dict[str, Any]) -> Dict[str, Any]:
         ),
     )
     merged["send_timeout_seconds"] = max(30, _to_int(merged.get("send_timeout_seconds"), 120))
+    merged["chat_browser_lazy"] = bool(merged.get("chat_browser_lazy"))
     merged["badge_renewal_enabled"] = bool(merged.get("badge_renewal_enabled"))
     if "live_browser_enabled" in source:
         merged["live_browser_enabled"] = bool(merged.get("live_browser_enabled"))

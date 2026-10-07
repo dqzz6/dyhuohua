@@ -1,4 +1,4 @@
-"""程序入口：启动内置浏览器、定时服务与图形界面。"""
+"""程序入口：按需启动内置浏览器、定时服务与图形界面。"""
 
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ def main(argv=None) -> int:
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
 
-    from app.embedded import EmbeddedBrowser, prepare_debug_port
+    from app.embedded import EmbeddedBrowser, create_web_profile, prepare_debug_port
     from app.gui import MainWindow
     from app.service import Application
 
@@ -96,26 +96,46 @@ def main(argv=None) -> int:
     if args.port:
         application.update_config({"control_api_port": args.port})
 
-    browser = EmbeddedBrowser(PROFILE_DIR, profile_name=app_name)
+    shared_profile = None
+
+    def get_profile():
+        nonlocal shared_profile
+        if shared_profile is None:
+            shared_profile = create_web_profile(PROFILE_DIR, app_name)
+        return shared_profile
+
+    def create_chat_browser() -> EmbeddedBrowser:
+        browser = EmbeddedBrowser(
+            PROFILE_DIR,
+            profile_name=app_name,
+            profile=get_profile(),
+        )
+        browser.load_url(application.start_url())
+        return browser
 
     def create_live_browser() -> EmbeddedBrowser:
         live_browser = EmbeddedBrowser(
             PROFILE_DIR,
             profile_name=app_name,
-            profile=browser.profile,
+            profile=get_profile(),
         )
         live_browser.load_url("https://live.douyin.com/")
         return live_browser
 
+    browser = None
+    if not application.chat_browser_lazy:
+        browser = create_chat_browser()
+        application.mark_chat_browser_loaded()
     live_browser = create_live_browser() if application.live_browser_enabled else None
-    browser.load_url(application.start_url())
-    application.start()
     window = MainWindow(
         application,
-        browser,
+        browser=browser,
         live_browser=live_browser,
+        browser_factory=create_chat_browser,
         live_browser_factory=create_live_browser,
     )
+    application.set_chat_browser_loader(window.request_chat_browser_load)
+    application.start()
     window.show()
 
     exit_code = qt_app.exec()

@@ -65,6 +65,7 @@ def test_normalize_config() -> None:
     assert config["daily_enabled"] is True
     assert config["match_mode"] == "equals"
     assert config["target_names"] == []
+    assert config["chat_browser_lazy"] is True
     assert config["live_browser_enabled"] is False
     assert config["badge_renewal_enabled"] is False
     assert config["badge_check_interval_minutes"] == 10

@@ -9,7 +9,7 @@ import os
 import secrets
 import threading
 from datetime import datetime
-from typing import Any, Coroutine, Dict, List, Optional
+from typing import Any, Callable, Coroutine, Dict, List, Optional
 from urllib.parse import urlparse
 
 from .badge_renewal import (
@@ -111,15 +111,32 @@ class Application:
         self._send_lock: Optional[asyncio.Lock] = None
         self._badge_lock: Optional[asyncio.Lock] = None
         self._browser_lock: Optional[asyncio.Lock] = None
+        self._chat_browser_lock: Optional[asyncio.Lock] = None
         self._live_lock: Optional[asyncio.Lock] = None
         self._boot: Optional[concurrent.futures.Future] = None
         self._last_result: Dict[str, Any] = {}
         self._last_badge_result: Dict[str, Any] = {}
         self._stopped = False
+        self._chat_browser_available = False
+        self._chat_browser_loader: Optional[Callable[[], None]] = None
+
+    @property
+    def chat_browser_lazy(self) -> bool:
+        return bool(self.config.get("chat_browser_lazy"))
+
+    @property
+    def chat_browser_available(self) -> bool:
+        return self._chat_browser_available
 
     @property
     def live_browser_enabled(self) -> bool:
         return bool(self.config.get("live_browser_enabled"))
+
+    def set_chat_browser_loader(self, loader: Callable[[], None]) -> None:
+        self._chat_browser_loader = loader
+
+    def mark_chat_browser_loaded(self) -> None:
+        self._chat_browser_available = True
 
     def _create_live_browser_bridge(self) -> BrowserBridge:
         if self.live_browser is None:
@@ -146,12 +163,13 @@ class Application:
         self._send_lock = asyncio.Lock()
         self._badge_lock = asyncio.Lock()
         self._browser_lock = asyncio.Lock()
+        self._chat_browser_lock = asyncio.Lock()
         self._live_lock = asyncio.Lock()
         try:
-            await self.browser.start()
+            if self._chat_browser_available:
+                await self._start_chat_browser()
             if self.live_browser_enabled:
                 await self.enable_live_browser()
-            await self.network.start()
         except Exception as exc:
             self.logger.error(f"接管内置浏览器失败：{exc}")
         self.scheduler.start()
@@ -211,6 +229,42 @@ class Application:
     def start_url(self) -> str:
         return str(self.config.get("start_url") or "").strip() or self.selectors["chat_urls"][0]
 
+    async def enable_chat_browser(self) -> Dict[str, Any]:
+        """连接已经创建好的私信浏览器页面。"""
+        self._chat_browser_available = True
+        try:
+            await self._start_chat_browser()
+            status = await self.browser.status()
+            status["loaded"] = True
+            return status
+        except Exception as exc:
+            self.logger.warning(f"私信浏览器暂未就绪：{exc}")
+            return {
+                "loaded": True,
+                "started": False,
+                "url": "",
+                "title": "",
+                "error": str(exc),
+            }
+
+    async def _require_chat_browser(self) -> BrowserBridge:
+        if not self._chat_browser_available:
+            loader = self._chat_browser_loader
+            if loader is None:
+                raise RuntimeError("私信浏览器尚未加载，请先点「打开私信页」")
+            await asyncio.to_thread(loader)
+        if not self._chat_browser_available:
+            raise RuntimeError("私信浏览器尚未加载，请先点「打开私信页」")
+        await self._start_chat_browser()
+        return self.browser
+
+    async def _start_chat_browser(self) -> None:
+        if self._chat_browser_lock is None:
+            self._chat_browser_lock = asyncio.Lock()
+        async with self._chat_browser_lock:
+            await self.browser.start()
+            await self.network.start()
+
     async def open_start_page(self) -> None:
         try:
             await self.browser.goto(self.start_url())
@@ -218,9 +272,14 @@ class Application:
             self.logger.warning(f"打开起始页面失败：{exc}")
 
     async def open_browser(self) -> Dict[str, Any]:
-        await self.browser.start()
+        await self._require_chat_browser()
         await self.open_start_page()
         return await self.browser.status()
+
+    async def goto_chat_url(self, url: str) -> Dict[str, Any]:
+        await self._require_chat_browser()
+        await self.browser.goto(url)
+        return {"url": str(url)}
 
     async def enable_live_browser(self) -> Dict[str, Any]:
         """连接已经创建好的直播浏览器页面。页面必须由界面线程提前加载。"""
@@ -265,6 +324,8 @@ class Application:
         return bridge
 
     async def _guess_logged_in(self) -> Optional[bool]:
+        if not self._chat_browser_available:
+            return None
         try:
             probe = await probe_page(self.browser, self.selectors)
         except Exception:
@@ -276,7 +337,17 @@ class Application:
         return None
 
     async def status(self) -> Dict[str, Any]:
-        browser_status = await self.browser.status()
+        if self._chat_browser_available:
+            browser_status = await self.browser.status()
+            browser_status["loaded"] = True
+        else:
+            browser_status = {
+                "loaded": False,
+                "started": False,
+                "url": "",
+                "title": "",
+                "page_count": 0,
+            }
         if self.live_browser_enabled and self.live_browser is not None:
             live_browser_status = await self.live_browser.status()
             live_browser_status["enabled"] = True
@@ -338,6 +409,7 @@ class Application:
 
     async def scan_friends(self, cache: bool = True, reload: bool = True) -> List[Dict[str, Any]]:
         """读取完整好友列表：页面滚动定位 + 接口数据校准昵称与头像。"""
+        await self._require_chat_browser()
         # 先重新加载私信页，清掉前端缓存，保证每位好友的详情接口都会重新请求一次。
         self.network.clear()
         if reload:
@@ -368,6 +440,7 @@ class Application:
 
     async def check_friends_fresh(self, sample_size: int = 3) -> Dict[str, Any]:
         """只校验缓存名单最前面几位是否还在当前列表里，不做整表滚动。"""
+        await self._require_chat_browser()
         cached = read_cache()
         if not cached:
             return {"fresh": False, "reason": "没有缓存名单", "friends": []}
@@ -388,6 +461,7 @@ class Application:
 
     async def ensure_friends_ready(self, force: bool = False) -> Dict[str, Any]:
         """启动时优先复用缓存名单，只有快速校验不通过才整表重读。"""
+        await self._require_chat_browser()
         if force:
             return {"mode": "full", "friends": await self.scan_friends()}
 
@@ -427,11 +501,13 @@ class Application:
         return {"cleared": True}
 
     async def capture_reload(self) -> Dict[str, Any]:
+        await self._require_chat_browser()
         page_url = await self.browser.evaluate("location.href")
         await self.browser.goto(str(page_url))
         return {"url": page_url}
 
     async def _ensure_chat_page(self) -> None:
+        await self._require_chat_browser()
         # 页面可能还在加载，先给几次机会，避免把已经打开的私信页重新导航掉。
         for _ in range(3):
             try:
@@ -749,18 +825,22 @@ class Application:
 
     # ---------- 控制接口用到的页面操作 ----------
     async def evaluate_script(self, script: str) -> Any:
+        await self._require_chat_browser()
         return await self.browser.evaluate(script)
 
     async def query_selector(self, selector: str, limit: int = 20) -> Any:
+        await self._require_chat_browser()
         return await query_elements(self.browser, selector, limit)
 
     async def click(self, selector: str) -> Dict[str, Any]:
+        await self._require_chat_browser()
         clicked = await click_selector(self.browser, [selector])
         if not clicked:
             raise ValueError(f"没有找到可点击的元素：{selector}")
         return {"selector": selector, "clicked": True}
 
     async def type_text(self, selector: str, text: str, submit: bool = False) -> Dict[str, Any]:
+        await self._require_chat_browser()
         await click_selector(self.browser, [selector], fallback_js=False)
         await self.browser.insert_text(str(text))
         if submit:
@@ -768,16 +848,19 @@ class Application:
         return {"selector": selector, "length": len(str(text)), "submitted": bool(submit)}
 
     async def press(self, key: str) -> Dict[str, Any]:
+        await self._require_chat_browser()
         await self.browser.press_key(key)
         return {"key": key}
 
     async def take_screenshot(self, full_page: bool = False) -> Dict[str, Any]:
+        await self._require_chat_browser()
         stamp = datetime.now(BEIJING).strftime("%Y%m%d-%H%M%S")
         path = LOG_DIR / f"截图-{stamp}.png"
         await self.browser.screenshot(path, full_page=full_page)
         return {"path": str(path)}
 
     async def page_html(self, limit: int = 0) -> str:
+        await self._require_chat_browser()
         html = await self.browser.evaluate("document.documentElement.outerHTML")
         text = str(html or "")
         if limit and int(limit) > 0:
@@ -785,7 +868,10 @@ class Application:
         return text
 
     async def pages_info(self) -> Any:
-        chat = await self.browser.status()
+        if self._chat_browser_available:
+            chat = await self.browser.status()
+        else:
+            chat = {"url": "", "title": "", "loaded": False}
         if self.live_browser_enabled and self.live_browser is not None:
             live = await self.live_browser.status()
         else:

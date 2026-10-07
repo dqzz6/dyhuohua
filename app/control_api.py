@@ -87,8 +87,7 @@ class _Handler(BaseHTTPRequestHandler):
                 url = str(body.get("url") or "").strip()
                 if not url:
                     raise ValueError("缺少参数 url")
-                self._run(app.browser.goto(url), 90)
-                self._send_json({"ok": True, "data": {"url": url}})
+                self._send_json({"ok": True, "data": self._run(app.goto_chat_url(url), 90)})
             elif method == "POST" and path == "/evaluate":
                 script = str(body.get("script") or "").strip()
                 if not script:

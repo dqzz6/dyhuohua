@@ -46,6 +46,7 @@ def _check_config() -> None:
     _check(config["send_time"] == "07:30", "配置补全失败")
     _check(config["target_names"] == [], "缺省好友列表应为空")
     _check(config["daily_enabled"] is True, "缺省应开启每日定时")
+    _check(config["chat_browser_lazy"] is True, "缺省应延迟加载私信浏览器")
     _check(config["live_browser_enabled"] is False, "缺省不应加载直播浏览器")
     migrated = normalize_config({"target_name": "旧版好友"})
     _check(migrated["target_names"] == ["旧版好友"], "旧版单好友配置未迁移")
@@ -277,10 +278,15 @@ TEST_SELECTORS = {
 
 def _check_embedded_flow() -> None:
     """在真实的内置浏览器里跑一遍完整发送流程（用本地自检页面代替抖音页面）。"""
-    from PySide6.QtCore import QMetaObject, Qt, QUrl
+    from PySide6.QtCore import QMetaObject, QObject, Qt, QUrl, Signal, Slot
     from PySide6.QtWidgets import QApplication
 
-    from .embedded import EmbeddedBrowser, find_free_port, prepare_debug_port
+    from .embedded import (
+        EmbeddedBrowser,
+        create_web_profile,
+        find_free_port,
+        prepare_debug_port,
+    )
     from .service import Application
 
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
@@ -288,27 +294,72 @@ def _check_embedded_flow() -> None:
     qt_app = QApplication.instance() or QApplication(sys.argv[:1])
 
     temp_dir = Path(tempfile.mkdtemp(prefix="douyin-selftest-"))
-    browser = EmbeddedBrowser(temp_dir / "profile")
+    profile = create_web_profile(temp_dir / "profile", "自检浏览器")
     live_browser = EmbeddedBrowser(
         temp_dir / "profile",
-        profile=browser.profile,
+        profile=profile,
     )
-    browser.resize(900, 640)
     live_browser.resize(900, 640)
-    browser.show()
     live_browser.show()
     application = Application(port, write_runtime=False)
     application.selectors = TEST_SELECTORS
     application.config["daily_enabled"] = False  # 自检期间关闭定时，避免干扰
+    application.config["chat_browser_lazy"] = True
     application.config["live_browser_enabled"] = True
     application.config["badge_renewal_enabled"] = False
     application.config["control_api_port"] = find_free_port()
     application.store = SendStore(temp_dir / "history.json")
-    application.start()
+
+    class BrowserLoader(QObject):
+        load_requested = Signal()
+
+        def __init__(self):
+            super().__init__()
+            self.browser = None
+            self._event = None
+            self.error = ""
+            self.load_requested.connect(self._load)
+
+        def request(self) -> None:
+            self._event = threading.Event()
+            self.error = ""
+            self.load_requested.emit()
+            if not self._event.wait(30):
+                raise RuntimeError("等待私信浏览器加载超时")
+            if self.error:
+                raise RuntimeError(self.error)
+
+        @Slot()
+        def _load(self) -> None:
+            try:
+                browser = EmbeddedBrowser(
+                    temp_dir / "profile",
+                    profile=profile,
+                )
+                browser.resize(900, 640)
+                browser.show()
+                browser.setHtml(
+                    TEST_PAGE,
+                    QUrl("https://creator.douyin.com/selftest"),
+                )
+                self.browser = browser
+                application.mark_chat_browser_loaded()
+            except Exception as exc:
+                self.error = repr(exc)
+            finally:
+                if self._event is not None:
+                    self._event.set()
+
+    loader = BrowserLoader()
+    application.set_chat_browser_loader(loader.request)
 
     outcome = {}
 
     def wait_page_ready(timeout: float = 30.0) -> bool:
+        try:
+            application.submit(application._require_chat_browser()).result(timeout=90)
+        except Exception:
+            return False
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
@@ -327,6 +378,7 @@ def _check_embedded_flow() -> None:
     def worker() -> None:
         try:
             application.wait_boot(60)
+            _check(application.chat_browser_available is False, "启动时不应立即加载私信浏览器")
             _check(wait_page_ready(30.0), "自检页面没有加载出来")
             result = application.submit(
                 application.run_send_now(targets=["测试好友", "另一个好友"], message="自检消息")
@@ -376,8 +428,8 @@ def _check_embedded_flow() -> None:
         finally:
             QMetaObject.invokeMethod(qt_app, "quit", Qt.ConnectionType.QueuedConnection)
 
-    browser.setHtml(TEST_PAGE, QUrl("https://creator.douyin.com/selftest"))
     live_browser.setHtml(TEST_BADGE_PAGE, QUrl("https://live.douyin.com/selftest"))
+    application.start()
     threading.Thread(target=worker, name="selftest-browser", daemon=True).start()
     qt_app.exec()
     application.stop()

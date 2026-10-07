@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import Qt, QSize, QTimer, Signal
+from PySide6.QtCore import Qt, QSize, QThread, QTimer, Signal
 from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QSpinBox,
     QSplitter,
+    QStackedWidget,
     QStyle,
     QTabWidget,
     QVBoxLayout,
@@ -247,18 +248,21 @@ class MainWindow(QMainWindow):
     friends_ready = Signal(dict)
     badge_finished = Signal(dict)
     badge_test_finished = Signal(dict)
+    chat_browser_load_requested = Signal()
 
     def __init__(
         self,
         app: Application,
-        browser: EmbeddedBrowser,
+        browser: Optional[EmbeddedBrowser] = None,
         live_browser: Optional[EmbeddedBrowser] = None,
+        browser_factory: Optional[Callable[[], EmbeddedBrowser]] = None,
         live_browser_factory: Optional[Callable[[], EmbeddedBrowser]] = None,
     ):
         super().__init__()
         self.app = app
         self.browser = browser
         self.live_browser = live_browser
+        self._browser_factory = browser_factory
         self._live_browser_factory = live_browser_factory
         self._closing = False
         self._busy = False
@@ -268,6 +272,9 @@ class MainWindow(QMainWindow):
         self._loading = False
         self._friends = []
         self._selected_names = set()
+        self._chat_browser_load_event = None
+        self._chat_browser_load_error = ""
+        self._chat_browser_load_lock = threading.Lock()
 
         self.setWindowTitle("抖音自动消息")
         self.resize(1480, 980)
@@ -286,7 +293,16 @@ class MainWindow(QMainWindow):
         splitter.setObjectName("mainSplitter")
         browser_tabs = QTabWidget()
         browser_tabs.setObjectName("browserTabs")
-        browser_tabs.addTab(self.browser, "私信浏览器")
+        self.browser_stack = QStackedWidget()
+        self.browser_placeholder = self._build_browser_placeholder(
+            "私信浏览器尚未加载",
+            "到发送时间、读取好友或手动打开私信页时会自动加载。",
+        )
+        self.browser_stack.addWidget(self.browser_placeholder)
+        if self.browser is not None:
+            self.browser_stack.addWidget(self.browser)
+            self.browser_stack.setCurrentWidget(self.browser)
+        browser_tabs.addTab(self.browser_stack, "私信浏览器")
         self.browser_tabs = browser_tabs
         if self.live_browser is not None:
             browser_tabs.addTab(self.live_browser, "直播浏览器")
@@ -296,6 +312,82 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 5)
         splitter.setSizes([820, 620])
         self.setCentralWidget(splitter)
+
+    def _build_browser_placeholder(self, title: str, detail: str) -> QWidget:
+        placeholder = QWidget()
+        layout = QVBoxLayout(placeholder)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        heading = QLabel(title)
+        heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        heading.setStyleSheet("font-size: 18px; font-weight: 700; color: #24364e;")
+        hint = QLabel(detail)
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #6b7c90; margin-top: 8px;")
+        button = QPushButton("立即加载私信浏览器")
+        button.setObjectName("primaryButton")
+        button.setFixedWidth(190)
+        button.clicked.connect(self._reload_clicked)
+        layout.addWidget(heading)
+        layout.addWidget(hint)
+        layout.addSpacing(14)
+        layout.addWidget(button, 0, Qt.AlignmentFlag.AlignHCenter)
+        return placeholder
+
+    def _ensure_chat_browser_loaded(self) -> EmbeddedBrowser:
+        """创建私信浏览器页面，并通知后台服务接管。"""
+        if self.browser is not None:
+            return self.browser
+        if self._browser_factory is None:
+            raise RuntimeError("私信浏览器加载器不可用")
+        browser = self._browser_factory()
+        self.browser = browser
+        self.browser_stack.addWidget(browser)
+        self.browser_stack.setCurrentWidget(browser)
+        self.app.mark_chat_browser_loaded()
+        try:
+            self.app.submit(self.app.enable_chat_browser())
+        except Exception:
+            pass
+        return browser
+
+    def request_chat_browser_load(self) -> None:
+        """供后台定时任务调用，在界面线程完成页面创建后返回。"""
+        if QThread.currentThread() == self.thread():
+            self._ensure_chat_browser_loaded()
+            return
+        with self._chat_browser_load_lock:
+            if self.browser is not None:
+                return
+            event = threading.Event()
+            self._chat_browser_load_event = event
+            self._chat_browser_load_error = ""
+            self.chat_browser_load_requested.emit()
+            if not event.wait(60):
+                raise RuntimeError("等待私信浏览器加载超时")
+            if self._chat_browser_load_error:
+                raise RuntimeError(self._chat_browser_load_error)
+
+    def _on_chat_browser_load_requested(self) -> None:
+        try:
+            self._ensure_chat_browser_loaded()
+        except Exception as exc:
+            self._chat_browser_load_error = str(exc)
+        finally:
+            event = self._chat_browser_load_event
+            if event is not None:
+                event.set()
+
+    def _release_chat_browser_loader(self) -> None:
+        event = self._chat_browser_load_event
+        if event is not None and not event.is_set():
+            self._chat_browser_load_error = "程序正在退出"
+            event.set()
+
+    def _show_chat_browser_tab(self) -> EmbeddedBrowser:
+        browser = self._ensure_chat_browser_loaded()
+        self.browser_tabs.setCurrentIndex(0)
+        return browser
 
     def _ensure_live_browser_loaded(self) -> EmbeddedBrowser:
         """只在启用直播功能时创建第二个浏览器页面。"""
@@ -340,6 +432,10 @@ class MainWindow(QMainWindow):
             self.app.submit(self.app.disable_live_browser())
         except Exception:
             pass
+
+    def _apply_chat_browser_setting(self, lazy: bool) -> None:
+        if not lazy:
+            self._ensure_chat_browser_loaded()
 
     def _set_button_icon(
         self,
@@ -450,6 +546,7 @@ class MainWindow(QMainWindow):
         self.input_time.setFixedWidth(72)
         self.check_daily = QCheckBox("每天定时发送")
         self.check_missed = QCheckBox("错过时间后不限时补发")
+        self.check_chat_lazy = QCheckBox("启动时不加载私信浏览器（到发送时再加载）")
         self.input_message = QPlainTextEdit()
         self.input_message.setFixedHeight(78)
         self.radio_random = QRadioButton("随机抽一行")
@@ -471,10 +568,11 @@ class MainWindow(QMainWindow):
         grid.addWidget(QLabel("HH:MM（北京时间）"), 0, 2)
         grid.addWidget(self.check_daily, 1, 1, 1, 2)
         grid.addWidget(self.check_missed, 2, 1, 1, 2)
-        grid.addWidget(QLabel("发送方式"), 3, 0, Qt.AlignmentFlag.AlignTop)
-        grid.addLayout(mode_box, 3, 1, 1, 2)
-        grid.addWidget(QLabel("消息内容"), 4, 0, Qt.AlignmentFlag.AlignTop)
-        grid.addWidget(self.input_message, 4, 1, 1, 2)
+        grid.addWidget(self.check_chat_lazy, 3, 1, 1, 2)
+        grid.addWidget(QLabel("发送方式"), 4, 0, Qt.AlignmentFlag.AlignTop)
+        grid.addLayout(mode_box, 4, 1, 1, 2)
+        grid.addWidget(QLabel("消息内容"), 5, 0, Qt.AlignmentFlag.AlignTop)
+        grid.addWidget(self.input_message, 5, 1, 1, 2)
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(2, 1)
         return group
@@ -651,6 +749,7 @@ class MainWindow(QMainWindow):
         self.spin_badge_watch.valueChanged.connect(self._update_badge_hint)
         self.button_badge_test.clicked.connect(self._badge_test_clicked)
         self.button_badge_send_test.clicked.connect(self._badge_send_test_clicked)
+        self.chat_browser_load_requested.connect(self._on_chat_browser_load_requested)
         self.send_finished.connect(self._on_send_finished)
         self.friends_ready.connect(self._on_friends_ready)
         self.badge_finished.connect(self._on_badge_finished)
@@ -662,6 +761,7 @@ class MainWindow(QMainWindow):
         self.input_time.setText(str(config.get("send_time") or "09:00"))
         self.check_daily.setChecked(bool(config.get("daily_enabled")))
         self.check_missed.setChecked(bool(config.get("missed_run")))
+        self.check_chat_lazy.setChecked(bool(config.get("chat_browser_lazy")))
         self.input_message.setPlainText(str(config.get("message") or ""))
         if str(config.get("message_mode")) == "random_line":
             self.radio_random.setChecked(True)
@@ -878,6 +978,7 @@ class MainWindow(QMainWindow):
         names = self._checked_names()
         try:
             badge_urls = normalize_live_urls(self.input_badge_urls.toPlainText())
+            chat_browser_lazy = self.check_chat_lazy.isChecked()
             live_browser_enabled = self.check_live_browser.isChecked()
             if self.check_badge_enabled.isChecked() and not live_browser_enabled:
                 self.check_live_browser.setChecked(True)
@@ -896,6 +997,7 @@ class MainWindow(QMainWindow):
                     "send_time": self.input_time.text().strip(),
                     "daily_enabled": self.check_daily.isChecked(),
                     "missed_run": self.check_missed.isChecked(),
+                    "chat_browser_lazy": chat_browser_lazy,
                     "live_browser_enabled": live_browser_enabled,
                     "badge_renewal_enabled": self.check_badge_enabled.isChecked(),
                     "badge_live_urls": badge_urls,
@@ -909,17 +1011,19 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "保存失败", f"保存设置时出错：{exc}")
             return False
+        self._apply_chat_browser_setting(chat_browser_lazy)
         self._apply_live_browser_setting(live_browser_enabled)
         self.label_selected.setText(f"已选好友（{len(names)} 位，双击可移除）")
         return True
 
     def _reload_clicked(self) -> None:
-        self.browser_tabs.setCurrentIndex(0)
-        self.browser.load_url(self.app.start_url())
+        browser = self._show_chat_browser_tab()
+        browser.load_url(self.app.start_url())
 
     def _scan_friends(self, auto: bool = False) -> None:
         if self._busy:
             return
+        self._show_chat_browser_tab()
         self._busy = True
         self.button_scan.setEnabled(False)
         if not auto:
@@ -945,6 +1049,7 @@ class MainWindow(QMainWindow):
         """启动后先做快速校验：缓存名单还能对上就直接用，不再整表重读。"""
         if self._busy:
             return
+        self._show_chat_browser_tab()
         self._busy = True
         self.button_scan.setEnabled(False)
 
@@ -991,7 +1096,7 @@ class MainWindow(QMainWindow):
     def _send_now_clicked(self) -> None:
         if not self._save():
             return
-        self.browser_tabs.setCurrentIndex(0)
+        self._show_chat_browser_tab()
         names = self._checked_names()
         if not names:
             QMessageBox.warning(self, "提示", "请先搜索并勾选要发送的好友")
@@ -1153,7 +1258,12 @@ class MainWindow(QMainWindow):
             self.label_browser.setText("状态读取失败")
         else:
             browser = status.get("browser") or {}
-            self.label_browser.setText("运行中" if browser.get("started") else "未启动")
+            if not browser.get("loaded"):
+                self.label_browser.setText("按需加载")
+            elif browser.get("started"):
+                self.label_browser.setText("运行中")
+            else:
+                self.label_browser.setText("加载中")
             live_browser = status.get("live_browser") or {}
             if not live_browser.get("enabled"):
                 self.label_live_browser.setText("未启用")
@@ -1235,6 +1345,7 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self._closing = True
+        self._release_chat_browser_loader()
         try:
             self.app.stop()
         except Exception:
