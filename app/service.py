@@ -33,6 +33,7 @@ from .friends import (
     write_cache,
 )
 from .logger import BEIJING, setup_logger
+from .live_status import LiveStatusClient
 from .message import normalize_mode, pick_message
 from .network import NetworkCapture
 from .paths import LOG_DIR, RUNTIME_PATH, ensure_dirs
@@ -119,6 +120,9 @@ class Application:
         self._stopped = False
         self._chat_browser_available = False
         self._chat_browser_loader: Optional[Callable[[], None]] = None
+        self._live_browser_available = False
+        self._live_browser_loader: Optional[Callable[[], None]] = None
+        self.live_status = LiveStatusClient(self.logger)
 
     @property
     def chat_browser_lazy(self) -> bool:
@@ -137,6 +141,12 @@ class Application:
 
     def mark_chat_browser_loaded(self) -> None:
         self._chat_browser_available = True
+
+    def set_live_browser_loader(self, loader: Callable[[], None]) -> None:
+        self._live_browser_loader = loader
+
+    def mark_live_browser_loaded(self) -> None:
+        self._live_browser_available = True
 
     def _create_live_browser_bridge(self) -> BrowserBridge:
         if self.live_browser is None:
@@ -168,8 +178,6 @@ class Application:
         try:
             if self._chat_browser_available:
                 await self._start_chat_browser()
-            if self.live_browser_enabled:
-                await self.enable_live_browser()
         except Exception as exc:
             self.logger.error(f"接管内置浏览器失败：{exc}")
         self.scheduler.start()
@@ -290,6 +298,7 @@ class Application:
                 "url": "",
                 "title": "",
             }
+        self._live_browser_available = True
         try:
             bridge = self._create_live_browser_bridge()
             await bridge.start()
@@ -310,6 +319,7 @@ class Application:
         """关闭直播浏览器的 CDP 连接，页面控件由界面线程负责释放。"""
         bridge = self.live_browser
         self.live_browser = None
+        self._live_browser_available = False
         if bridge is not None:
             await bridge.stop()
         return {"enabled": False, "started": False}
@@ -317,9 +327,14 @@ class Application:
     async def _require_live_browser(self) -> BrowserBridge:
         if not self.live_browser_enabled:
             raise RuntimeError("直播浏览器未启用，请先勾选“启用直播浏览器”并保存")
-        bridge = self.live_browser
-        if bridge is None:
-            raise RuntimeError("直播浏览器尚未加载，请先勾选“启用直播浏览器”并保存")
+        if not self._live_browser_available:
+            loader = self._live_browser_loader
+            if loader is None:
+                raise RuntimeError("直播浏览器加载器不可用")
+            await asyncio.to_thread(loader)
+        if not self._live_browser_available:
+            raise RuntimeError("直播浏览器尚未加载")
+        bridge = self._create_live_browser_bridge()
         await bridge.start()
         return bridge
 
@@ -348,12 +363,18 @@ class Application:
                 "title": "",
                 "page_count": 0,
             }
-        if self.live_browser_enabled and self.live_browser is not None:
+        if (
+            self.live_browser_enabled
+            and self._live_browser_available
+            and self.live_browser is not None
+        ):
             live_browser_status = await self.live_browser.status()
             live_browser_status["enabled"] = True
+            live_browser_status["loaded"] = True
         else:
             live_browser_status = {
                 "enabled": bool(self.live_browser_enabled),
+                "loaded": False,
                 "started": False,
                 "url": "",
                 "title": "",
@@ -674,10 +695,6 @@ class Application:
                 return {"ok": False, "detail": str(exc), "results": []}
             if not live_urls:
                 return {"ok": False, "detail": "没有配置需要监控的直播间地址", "results": []}
-            try:
-                live_bridge = await self._require_live_browser()
-            except Exception as exc:
-                return {"ok": False, "detail": str(exc), "results": []}
 
             interval = int(config.get("badge_check_interval_minutes") or 10)
             watch_minutes = int(config.get("badge_watch_minutes") or 20)
@@ -699,23 +716,48 @@ class Application:
                     )
                     continue
 
-                self.logger.info(f"开始续灯牌（{reason}）：{live_url}")
-                async with self._live_lock:
+                room_id = urlparse(live_url).path.strip("/")
+                self.logger.info(f"通过直播接口检测是否开播（{reason}）：{live_url}")
+                status_result = await self.live_status.check(room_id)
+                if status_result.get("status") != "live":
+                    result = {
+                        "status": (
+                            "not_live"
+                            if status_result.get("status") == "not_live"
+                            else "failed"
+                        ),
+                        "detail": str(status_result.get("detail") or ""),
+                        "liveTitle": str(status_result.get("title") or ""),
+                        "watchedSeconds": 0,
+                    }
+                else:
                     try:
-                        result = await renew_badge_in_live_room(
-                            live_bridge,
-                            live_url,
-                            watch_minutes,
-                            self.logger,
-                        )
+                        live_bridge = await self._require_live_browser()
                     except Exception as exc:
                         result = {
                             "status": "failed",
                             "detail": f"{type(exc).__name__}：{exc}",
-                            "liveTitle": "",
+                            "liveTitle": str(status_result.get("title") or ""),
                             "watchedSeconds": 0,
                         }
-                        self.logger.exception(f"续灯牌任务异常：{live_url}")
+                    else:
+                        self.logger.info(f"接口确认已开播，开始续灯牌：{live_url}")
+                        async with self._live_lock:
+                            try:
+                                result = await renew_badge_in_live_room(
+                                    live_bridge,
+                                    live_url,
+                                    watch_minutes,
+                                    self.logger,
+                                )
+                            except Exception as exc:
+                                result = {
+                                    "status": "failed",
+                                    "detail": f"{type(exc).__name__}：{exc}",
+                                    "liveTitle": str(status_result.get("title") or ""),
+                                    "watchedSeconds": 0,
+                                }
+                                self.logger.exception(f"续灯牌任务异常：{live_url}")
 
                 status = str(result.get("status") or "failed")
                 detail = str(result.get("detail") or "")
@@ -773,27 +815,50 @@ class Application:
                 return {"ok": False, "detail": str(exc), "results": []}
             if not live_urls:
                 return {"ok": False, "detail": "没有配置需要测试的直播间地址", "results": []}
-            try:
-                live_bridge = await self._require_live_browser()
-            except Exception as exc:
-                return {"ok": False, "detail": str(exc), "results": []}
 
             live_url = live_urls[0]
-            async with self._live_lock:
+            room_id = urlparse(live_url).path.strip("/")
+            self.logger.info(f"通过直播接口检测是否开播：{live_url}")
+            status_result = await self.live_status.check(room_id)
+            if status_result.get("status") != "live":
+                status = (
+                    "not_live"
+                    if status_result.get("status") == "not_live"
+                    else "failed"
+                )
+                detail = str(status_result.get("detail") or "")
+                result = {
+                    "status": status,
+                    "detail": detail,
+                    "liveTitle": str(status_result.get("title") or ""),
+                    "watchedSeconds": 0,
+                }
+            else:
                 try:
-                    result = await test_badge_gift_in_live_room(
-                        live_bridge,
-                        live_url,
-                        self.logger,
-                    )
+                    live_bridge = await self._require_live_browser()
                 except Exception as exc:
                     result = {
                         "status": "failed",
                         "detail": f"{type(exc).__name__}：{exc}",
-                        "liveTitle": "",
+                        "liveTitle": str(status_result.get("title") or ""),
                         "watchedSeconds": 0,
                     }
-                    self.logger.exception(f"测试赠送灯牌异常：{live_url}")
+                else:
+                    async with self._live_lock:
+                        try:
+                            result = await test_badge_gift_in_live_room(
+                                live_bridge,
+                                live_url,
+                                self.logger,
+                            )
+                        except Exception as exc:
+                            result = {
+                                "status": "failed",
+                                "detail": f"{type(exc).__name__}：{exc}",
+                                "liveTitle": str(status_result.get("title") or ""),
+                                "watchedSeconds": 0,
+                            }
+                            self.logger.exception(f"测试赠送灯牌异常：{live_url}")
 
             status = str(result.get("status") or "failed")
             detail = str(result.get("detail") or "")
@@ -872,10 +937,19 @@ class Application:
             chat = await self.browser.status()
         else:
             chat = {"url": "", "title": "", "loaded": False}
-        if self.live_browser_enabled and self.live_browser is not None:
+        if (
+            self.live_browser_enabled
+            and self._live_browser_available
+            and self.live_browser is not None
+        ):
             live = await self.live_browser.status()
         else:
-            live = {"url": "", "title": "", "enabled": bool(self.live_browser_enabled)}
+            live = {
+                "url": "",
+                "title": "",
+                "enabled": bool(self.live_browser_enabled),
+                "loaded": False,
+            }
         return [
             {
                 "index": 0,

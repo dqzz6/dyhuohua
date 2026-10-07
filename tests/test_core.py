@@ -22,6 +22,7 @@ from app.friends import extract_user_details, merge_friends, normalize_key  # no
 from app.gui import filter_friend_names, order_selected_names  # noqa: E402
 from app.message import RANDOM_LINE, WHOLE, pick_message, split_candidates  # noqa: E402
 from app.logger import BEIJING  # noqa: E402
+from app.live_status import parse_live_status_payload  # noqa: E402
 from app.network import MAX_BODY_CHARS, NetworkCapture  # noqa: E402
 from app.paths import (  # noqa: E402
     DEFAULT_INSTANCE_NAME,
@@ -31,6 +32,7 @@ from app.paths import (  # noqa: E402
 )
 from app.scheduler import DailyScheduler, scheduled_at  # noqa: E402
 from app.sender import SendError, name_matches, normalize_text, send_message  # noqa: E402
+from app.service import Application  # noqa: E402
 from app.state import SendStore  # noqa: E402
 
 
@@ -177,6 +179,42 @@ def test_badge_store_interval_and_daily_success() -> None:
         assert reason == "今天已经续过灯牌"
 
 
+def test_badge_api_offline_does_not_load_live_browser() -> None:
+    class OfflineStatus:
+        async def check(self, room_id):
+            return {
+                "status": "not_live",
+                "live": False,
+                "detail": "主播当前未开播",
+                "title": "测试主播",
+                "roomStatus": 4,
+            }
+
+    with tempfile.TemporaryDirectory() as folder:
+        app = Application(12345, write_runtime=False)
+        app.config = normalize_config(
+            {
+                "badge_renewal_enabled": True,
+                "live_browser_enabled": True,
+                "badge_live_urls": ["https://live.douyin.com/114687942812"],
+            }
+        )
+        app.badge_store = BadgeRenewalStore(Path(folder) / "badge_history.json")
+        app.live_status = OfflineStatus()
+        loaded = []
+        app.set_live_browser_loader(lambda: loaded.append(True))
+
+        result = asyncio.run(
+            app.run_badge_renewal(
+                urls=["https://live.douyin.com/114687942812"],
+                force=True,
+            )
+        )
+
+        assert loaded == []
+        assert result["results"][0]["status"] == "not_live"
+
+
 def test_detect_live_status() -> None:
     assert detect_live_status(
         {
@@ -199,6 +237,42 @@ def test_detect_live_status() -> None:
             "body": "",
         }
     )[0] is False
+
+
+def test_parse_live_status_payload() -> None:
+    live = parse_live_status_payload(
+        {
+            "status_code": 0,
+            "data": {
+                "data": [
+                    {
+                        "status": 2,
+                        "title": "测试直播间",
+                    }
+                ]
+            },
+        }
+    )
+    assert live["status"] == "live"
+    assert live["live"] is True
+    assert live["title"] == "测试直播间"
+
+    offline = parse_live_status_payload(
+        {
+            "status_code": 0,
+            "data": {"data": [{"status": 4, "title": "测试直播间"}]},
+        }
+    )
+    assert offline["status"] == "not_live"
+    assert offline["live"] is False
+
+    empty = parse_live_status_payload({"status_code": 0, "data": {"data": []}})
+    assert empty["status"] == "not_live"
+    assert empty["live"] is False
+
+    failed = parse_live_status_payload({"status_code": 1001, "data": {}})
+    assert failed["status"] == "unknown"
+    assert failed["live"] is None
 
 
 def test_target_names_migration_and_dedup() -> None:

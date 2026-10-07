@@ -249,6 +249,7 @@ class MainWindow(QMainWindow):
     badge_finished = Signal(dict)
     badge_test_finished = Signal(dict)
     chat_browser_load_requested = Signal()
+    live_browser_load_requested = Signal()
 
     def __init__(
         self,
@@ -275,6 +276,9 @@ class MainWindow(QMainWindow):
         self._chat_browser_load_event = None
         self._chat_browser_load_error = ""
         self._chat_browser_load_lock = threading.Lock()
+        self._live_browser_load_event = None
+        self._live_browser_load_error = ""
+        self._live_browser_load_lock = threading.Lock()
 
         self.setWindowTitle("抖音自动消息")
         self.resize(1480, 980)
@@ -384,6 +388,12 @@ class MainWindow(QMainWindow):
             self._chat_browser_load_error = "程序正在退出"
             event.set()
 
+    def _release_live_browser_loader(self) -> None:
+        event = self._live_browser_load_event
+        if event is not None and not event.is_set():
+            self._live_browser_load_error = "程序正在退出"
+            event.set()
+
     def _show_chat_browser_tab(self) -> EmbeddedBrowser:
         browser = self._ensure_chat_browser_loaded()
         self.browser_tabs.setCurrentIndex(0)
@@ -398,7 +408,39 @@ class MainWindow(QMainWindow):
         live_browser = self._live_browser_factory()
         self.live_browser = live_browser
         self.browser_tabs.addTab(live_browser, "直播浏览器")
+        self.app.mark_live_browser_loaded()
+        try:
+            self.app.submit(self.app.enable_live_browser())
+        except Exception:
+            pass
         return live_browser
+
+    def request_live_browser_load(self) -> None:
+        """供后台续灯牌任务调用，在界面线程创建直播页后返回。"""
+        if QThread.currentThread() == self.thread():
+            self._ensure_live_browser_loaded()
+            return
+        with self._live_browser_load_lock:
+            if self.live_browser is not None:
+                return
+            event = threading.Event()
+            self._live_browser_load_event = event
+            self._live_browser_load_error = ""
+            self.live_browser_load_requested.emit()
+            if not event.wait(60):
+                raise RuntimeError("等待直播浏览器加载超时")
+            if self._live_browser_load_error:
+                raise RuntimeError(self._live_browser_load_error)
+
+    def _on_live_browser_load_requested(self) -> None:
+        try:
+            self._ensure_live_browser_loaded()
+        except Exception as exc:
+            self._live_browser_load_error = str(exc)
+        finally:
+            event = self._live_browser_load_event
+            if event is not None:
+                event.set()
 
     def _unload_live_browser(self) -> None:
         """移除直播页并释放 QtWebEngine 渲染资源。"""
@@ -413,19 +455,8 @@ class MainWindow(QMainWindow):
         if self.browser_tabs.count():
             self.browser_tabs.setCurrentIndex(0)
 
-    def _show_live_browser_tab(self) -> None:
-        live_browser = self._ensure_live_browser_loaded()
-        tab_index = self.browser_tabs.indexOf(live_browser)
-        if tab_index >= 0:
-            self.browser_tabs.setCurrentIndex(tab_index)
-
     def _apply_live_browser_setting(self, enabled: bool) -> None:
         if enabled:
-            self._ensure_live_browser_loaded()
-            try:
-                self.app.submit(self.app.enable_live_browser())
-            except Exception:
-                pass
             return
         self._unload_live_browser()
         try:
@@ -584,7 +615,7 @@ class MainWindow(QMainWindow):
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(6)
 
-        self.check_live_browser = QCheckBox("启用直播浏览器（不使用时不会加载）")
+        self.check_live_browser = QCheckBox("允许开播后按需加载直播浏览器")
         self.check_badge_enabled = QCheckBox("开启定时监控直播间")
         self.label_badge_count = QLabel("未配置直播间")
         self.label_badge_count.setObjectName("badgeCount")
@@ -606,7 +637,7 @@ class MainWindow(QMainWindow):
         self.spin_badge_watch.setRange(1, 180)
         self.spin_badge_watch.setSuffix(" 分钟")
         self.spin_badge_watch.setFixedWidth(112)
-        self.button_badge_test = QPushButton("检测直播间")
+        self.button_badge_test = QPushButton("接口检测开播状态")
         self.button_badge_test.setObjectName("accentButton")
         self._set_button_icon(
             self.button_badge_test,
@@ -750,6 +781,7 @@ class MainWindow(QMainWindow):
         self.button_badge_test.clicked.connect(self._badge_test_clicked)
         self.button_badge_send_test.clicked.connect(self._badge_send_test_clicked)
         self.chat_browser_load_requested.connect(self._on_chat_browser_load_requested)
+        self.live_browser_load_requested.connect(self._on_live_browser_load_requested)
         self.send_finished.connect(self._on_send_finished)
         self.friends_ready.connect(self._on_friends_ready)
         self.badge_finished.connect(self._on_badge_finished)
@@ -816,7 +848,7 @@ class MainWindow(QMainWindow):
         )
         if not self.check_live_browser.isChecked():
             self.label_badge_hint.setText(
-                "未启用直播浏览器，保存后不会创建直播页面，也不会占用额外内存；"
+                "未允许按需加载直播浏览器，保存后不会创建直播页面；"
                 "需要续灯牌时再勾选上方选项。"
             )
             return
@@ -824,7 +856,7 @@ class MainWindow(QMainWindow):
             if count:
                 self.label_badge_hint.setText(
                     f"已开启：每 {self.spin_badge_interval.value()} 分钟检测一次，"
-                    f"开播后续灯牌并挂满 {self.spin_badge_watch.value()} 分钟；"
+                    f"通过接口确认开播后才创建直播页面，并挂满 {self.spin_badge_watch.value()} 分钟；"
                     "挂机按实际播放时间累计，暂停会自动恢复。"
                 )
             else:
@@ -1130,7 +1162,6 @@ class MainWindow(QMainWindow):
         if not urls:
             QMessageBox.warning(self, "提示", "请先填写至少一个直播间地址")
             return
-        self._show_live_browser_tab()
         self._set_badge_actions_busy(True)
 
         def worker() -> None:
@@ -1168,7 +1199,6 @@ class MainWindow(QMainWindow):
         if not urls:
             QMessageBox.warning(self, "提示", "请先填写至少一个直播间地址")
             return
-        self._show_live_browser_tab()
         self._set_badge_actions_busy(True)
 
         def worker() -> None:
@@ -1267,10 +1297,12 @@ class MainWindow(QMainWindow):
             live_browser = status.get("live_browser") or {}
             if not live_browser.get("enabled"):
                 self.label_live_browser.setText("未启用")
-            elif live_browser.get("started"):
+            elif live_browser.get("loaded") and live_browser.get("started"):
                 self.label_live_browser.setText("运行中")
-            else:
+            elif live_browser.get("loaded"):
                 self.label_live_browser.setText("加载中")
+            else:
+                self.label_live_browser.setText("等待开播")
             logged_in = status.get("logged_in")
             self.label_login.setText(
                 "已登录"
@@ -1346,6 +1378,7 @@ class MainWindow(QMainWindow):
             return
         self._closing = True
         self._release_chat_browser_loader()
+        self._release_live_browser_loader()
         try:
             self.app.stop()
         except Exception:

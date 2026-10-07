@@ -295,12 +295,6 @@ def _check_embedded_flow() -> None:
 
     temp_dir = Path(tempfile.mkdtemp(prefix="douyin-selftest-"))
     profile = create_web_profile(temp_dir / "profile", "自检浏览器")
-    live_browser = EmbeddedBrowser(
-        temp_dir / "profile",
-        profile=profile,
-    )
-    live_browser.resize(900, 640)
-    live_browser.show()
     application = Application(port, write_runtime=False)
     application.selectors = TEST_SELECTORS
     application.config["daily_enabled"] = False  # 自检期间关闭定时，避免干扰
@@ -313,8 +307,10 @@ def _check_embedded_flow() -> None:
     class BrowserLoader(QObject):
         load_requested = Signal()
 
-        def __init__(self):
+        def __init__(self, factory, mark_loaded):
             super().__init__()
+            self.factory = factory
+            self.mark_loaded = mark_loaded
             self.browser = None
             self._event = None
             self.error = ""
@@ -332,26 +328,44 @@ def _check_embedded_flow() -> None:
         @Slot()
         def _load(self) -> None:
             try:
-                browser = EmbeddedBrowser(
-                    temp_dir / "profile",
-                    profile=profile,
-                )
-                browser.resize(900, 640)
-                browser.show()
-                browser.setHtml(
-                    TEST_PAGE,
-                    QUrl("https://creator.douyin.com/selftest"),
-                )
-                self.browser = browser
-                application.mark_chat_browser_loaded()
+                self.browser = self.factory()
+                self.mark_loaded()
             except Exception as exc:
                 self.error = repr(exc)
             finally:
                 if self._event is not None:
                     self._event.set()
 
-    loader = BrowserLoader()
-    application.set_chat_browser_loader(loader.request)
+    def create_chat_browser():
+        browser = EmbeddedBrowser(temp_dir / "profile", profile=profile)
+        browser.resize(900, 640)
+        browser.show()
+        browser.setHtml(
+            TEST_PAGE,
+            QUrl("https://creator.douyin.com/selftest"),
+        )
+        return browser
+
+    def create_live_browser():
+        browser = EmbeddedBrowser(temp_dir / "profile", profile=profile)
+        browser.resize(900, 640)
+        browser.show()
+        browser.setHtml(
+            TEST_BADGE_PAGE,
+            QUrl("https://live.douyin.com/selftest"),
+        )
+        return browser
+
+    chat_loader = BrowserLoader(
+        create_chat_browser,
+        application.mark_chat_browser_loaded,
+    )
+    live_loader = BrowserLoader(
+        create_live_browser,
+        application.mark_live_browser_loaded,
+    )
+    application.set_chat_browser_loader(chat_loader.request)
+    application.set_live_browser_loader(live_loader.request)
 
     outcome = {}
 
@@ -387,7 +401,7 @@ def _check_embedded_flow() -> None:
 
             async def probes():
                 bridge = application.browser
-                live_bridge = application.live_browser
+                live_bridge = await application._require_live_browser()
                 result = {
                     "eval": await bridge.evaluate("1 + 1"),
                     "title": await bridge.evaluate("document.title"),
@@ -428,7 +442,6 @@ def _check_embedded_flow() -> None:
         finally:
             QMetaObject.invokeMethod(qt_app, "quit", Qt.ConnectionType.QueuedConnection)
 
-    live_browser.setHtml(TEST_BADGE_PAGE, QUrl("https://live.douyin.com/selftest"))
     application.start()
     threading.Thread(target=worker, name="selftest-browser", daemon=True).start()
     qt_app.exec()

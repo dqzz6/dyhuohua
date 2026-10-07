@@ -126,15 +126,15 @@ def main(argv=None) -> int:
     if not application.chat_browser_lazy:
         browser = create_chat_browser()
         application.mark_chat_browser_loaded()
-    live_browser = create_live_browser() if application.live_browser_enabled else None
     window = MainWindow(
         application,
         browser=browser,
-        live_browser=live_browser,
+        live_browser=None,
         browser_factory=create_chat_browser,
         live_browser_factory=create_live_browser,
     )
     application.set_chat_browser_loader(window.request_chat_browser_load)
+    application.set_live_browser_loader(window.request_live_browser_load)
     application.start()
     window.show()
 

@@ -583,7 +583,7 @@ async def _watch_live_room(
         if "live.douyin.com" not in current_url:
             logger.warning("挂机期间直播间页面被切换，正在重新打开")
             await browser.goto(live_url)
-            await wait_for_live_room(browser, DEFAULT_LIVE_READY_WAIT_SECONDS)
+            await asyncio.sleep(1.5)
             no_play_since = None
             continue
 
@@ -632,17 +632,25 @@ async def renew_badge_on_current_page(
     logger,
     *,
     ready_timeout_seconds: float = DEFAULT_LIVE_READY_WAIT_SECONDS,
+    assume_live: bool = False,
 ) -> Dict[str, Any]:
     """处理当前已打开的直播间页面，适合浏览器自检复用。"""
     watch_seconds = max(0, int(watch_seconds))
-    is_live, detail, probe = await wait_for_live_room(browser, ready_timeout_seconds)
-    if not is_live:
-        return {
-            "status": "not_live",
-            "detail": detail,
-            "liveTitle": str((probe or {}).get("title") or ""),
-            "watchedSeconds": 0,
-        }
+    if assume_live:
+        detail = "接口已确认主播开播"
+        probe: Dict[str, Any] = {}
+    else:
+        is_live, detail, probe = await wait_for_live_room(
+            browser,
+            ready_timeout_seconds,
+        )
+        if not is_live:
+            return {
+                "status": "not_live",
+                "detail": detail,
+                "liveTitle": str((probe or {}).get("title") or ""),
+                "watchedSeconds": 0,
+            }
 
     entry = await _click_text_when_ready(
         browser,
@@ -787,6 +795,7 @@ async def renew_badge_in_live_room(
         watch_seconds,
         logger,
         ready_timeout_seconds=ready_timeout_seconds,
+        assume_live=True,
     )
 
 
@@ -807,6 +816,7 @@ async def test_badge_gift_in_live_room(
         0,
         logger,
         ready_timeout_seconds=ready_timeout_seconds,
+        assume_live=True,
     )
 
 
