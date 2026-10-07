@@ -16,8 +16,14 @@ echo 正在安装打包工具……
 if errorlevel 1 goto :error
 
 echo 正在清理旧构建……
-if exist "build\抖音自动消息" rmdir /s /q "build\抖音自动消息"
-if exist "dist\抖音自动消息" rmdir /s /q "dist\抖音自动消息"
+if exist "build\抖音自动消息" (
+    attrib -R "build\抖音自动消息\*" /S /D >nul 2>&1
+    rmdir /s /q "build\抖音自动消息"
+)
+if exist "dist\抖音自动消息" (
+    attrib -R "dist\抖音自动消息\*" /S /D >nul 2>&1
+    rmdir /s /q "dist\抖音自动消息"
+)
 
 echo 正在构建 Windows 程序……
 "%PYEXE%" -m PyInstaller --noconfirm --clean "抖音自动消息.spec"
