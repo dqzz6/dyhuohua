@@ -21,7 +21,7 @@ call :check_venv
 if errorlevel 1 call :prepare_venv
 if not exist "%PYEXE%" exit /b 1
 
-"%PYEXE%" main.py
+"%PYEXE%" main.py %*
 if errorlevel 1 (
     echo.
     echo 程序异常退出，请把上面的错误信息发给开发者。

@@ -243,10 +243,16 @@ class MainWindow(QMainWindow):
     badge_finished = Signal(dict)
     badge_test_finished = Signal(dict)
 
-    def __init__(self, app: Application, browser: EmbeddedBrowser):
+    def __init__(
+        self,
+        app: Application,
+        browser: EmbeddedBrowser,
+        live_browser: EmbeddedBrowser,
+    ):
         super().__init__()
         self.app = app
         self.browser = browser
+        self.live_browser = live_browser
         self._closing = False
         self._busy = False
         self._status = {}
@@ -271,7 +277,12 @@ class MainWindow(QMainWindow):
     def _build_widgets(self) -> None:
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setObjectName("mainSplitter")
-        splitter.addWidget(self.browser)
+        browser_tabs = QTabWidget()
+        browser_tabs.setObjectName("browserTabs")
+        browser_tabs.addTab(self.browser, "私信浏览器")
+        browser_tabs.addTab(self.live_browser, "直播浏览器")
+        self.browser_tabs = browser_tabs
+        splitter.addWidget(browser_tabs)
         splitter.addWidget(self._build_panel())
         splitter.setStretchFactor(0, 6)
         splitter.setStretchFactor(1, 5)
@@ -328,6 +339,7 @@ class MainWindow(QMainWindow):
         grid.setVerticalSpacing(6)
 
         self.label_browser = QLabel("未启动")
+        self.label_live_browser = QLabel("未启动")
         self.label_login = QLabel("未知")
         self.label_today = QLabel("未发送")
         self.label_next = QLabel("-")
@@ -336,6 +348,7 @@ class MainWindow(QMainWindow):
         bold.setBold(True)
         for label in (
             self.label_browser,
+            self.label_live_browser,
             self.label_login,
             self.label_today,
             self.label_next,
@@ -345,6 +358,7 @@ class MainWindow(QMainWindow):
 
         rows = (
             ("内置浏览器", self.label_browser),
+            ("直播浏览器", self.label_live_browser),
             ("登录状态", self.label_login),
             ("今日发送", self.label_today),
             ("下次发送", self.label_next),
@@ -801,6 +815,7 @@ class MainWindow(QMainWindow):
         return True
 
     def _reload_clicked(self) -> None:
+        self.browser_tabs.setCurrentIndex(0)
         self.browser.load_url(self.app.start_url())
 
     def _scan_friends(self, auto: bool = False) -> None:
@@ -877,6 +892,7 @@ class MainWindow(QMainWindow):
     def _send_now_clicked(self) -> None:
         if not self._save():
             return
+        self.browser_tabs.setCurrentIndex(0)
         names = self._checked_names()
         if not names:
             QMessageBox.warning(self, "提示", "请先搜索并勾选要发送的好友")
@@ -909,6 +925,7 @@ class MainWindow(QMainWindow):
         if not urls:
             QMessageBox.warning(self, "提示", "请先填写至少一个直播间地址")
             return
+        self.browser_tabs.setCurrentIndex(1)
         self._set_busy(True)
 
         def worker() -> None:
@@ -945,6 +962,7 @@ class MainWindow(QMainWindow):
         if not urls:
             QMessageBox.warning(self, "提示", "请先填写至少一个直播间地址")
             return
+        self.browser_tabs.setCurrentIndex(1)
         self._set_busy(True)
 
         def worker() -> None:
@@ -1031,6 +1049,10 @@ class MainWindow(QMainWindow):
         else:
             browser = status.get("browser") or {}
             self.label_browser.setText("运行中" if browser.get("started") else "未启动")
+            live_browser = status.get("live_browser") or {}
+            self.label_live_browser.setText(
+                "运行中" if live_browser.get("started") else "未启动"
+            )
             logged_in = status.get("logged_in")
             self.label_login.setText(
                 "已登录"

@@ -287,8 +287,14 @@ def _check_embedded_flow() -> None:
 
     temp_dir = Path(tempfile.mkdtemp(prefix="douyin-selftest-"))
     browser = EmbeddedBrowser(temp_dir / "profile")
+    live_browser = EmbeddedBrowser(
+        temp_dir / "profile",
+        profile=browser.profile,
+    )
     browser.resize(900, 640)
+    live_browser.resize(900, 640)
     browser.show()
+    live_browser.show()
     application = Application(port, write_runtime=False)
     application.selectors = TEST_SELECTORS
     application.config["daily_enabled"] = False  # 自检期间关闭定时，避免干扰
@@ -326,6 +332,7 @@ def _check_embedded_flow() -> None:
 
             async def probes():
                 bridge = application.browser
+                live_bridge = application.live_browser
                 result = {
                     "eval": await bridge.evaluate("1 + 1"),
                     "title": await bridge.evaluate("document.title"),
@@ -346,16 +353,18 @@ def _check_embedded_flow() -> None:
                 badge_data_url = "data:text/html;base64," + base64.b64encode(
                     TEST_BADGE_PAGE.encode("utf-8")
                 ).decode("ascii")
-                await bridge.goto(badge_data_url)
+                await live_bridge.goto(badge_data_url)
                 await asyncio.sleep(1.0)
                 result["badge"] = await renew_badge_on_current_page(
-                    bridge,
+                    live_bridge,
                     "https://live.douyin.com/114687942812",
                     0,
                     logging.getLogger("自检续灯牌"),
                     ready_timeout_seconds=10.0,
                 )
-                result["badgeSent"] = await bridge.evaluate("Boolean(window.__badgeSent)")
+                result["badgeSent"] = await live_bridge.evaluate(
+                    "Boolean(window.__badgeSent)"
+                )
                 return result
 
             outcome["probes"] = application.submit(probes()).result(timeout=90)

@@ -22,6 +22,12 @@ from app.friends import extract_user_details, merge_friends, normalize_key  # no
 from app.gui import filter_friend_names, order_selected_names  # noqa: E402
 from app.message import RANDOM_LINE, WHOLE, pick_message, split_candidates  # noqa: E402
 from app.logger import BEIJING  # noqa: E402
+from app.paths import (  # noqa: E402
+    DEFAULT_INSTANCE_NAME,
+    instance_port_offset,
+    instance_root,
+    normalize_instance_name,
+)
 from app.scheduler import DailyScheduler, scheduled_at  # noqa: E402
 from app.sender import SendError, name_matches, normalize_text, send_message  # noqa: E402
 from app.state import SendStore  # noqa: E402
@@ -37,6 +43,18 @@ def test_normalize_time() -> None:
         except ValueError:
             continue
         raise AssertionError(f"非法时间 {bad!r} 未被拦截")
+
+
+def test_instance_paths_and_ports() -> None:
+    assert normalize_instance_name("") == DEFAULT_INSTANCE_NAME
+    assert normalize_instance_name("账号 2") == "账号_2"
+    assert normalize_instance_name("../账号2") == "账号2"
+    assert instance_root(Path("data"), DEFAULT_INSTANCE_NAME) == Path("data")
+    assert instance_root(Path("data"), "账号2") == Path("data") / "实例" / "账号2"
+    assert instance_port_offset(DEFAULT_INSTANCE_NAME) == 0
+    assert instance_port_offset("账号2") > 0
+    assert instance_port_offset("账号2") == instance_port_offset("账号2")
+    assert instance_port_offset("账号2") != instance_port_offset("账号3")
 
 
 def test_normalize_config() -> None:

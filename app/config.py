@@ -15,7 +15,7 @@ from .badge_renewal import (
     MAX_WATCH_MINUTES,
 )
 from .badge_renewal import normalize_live_urls
-from .paths import CONFIG_PATH, ensure_dirs
+from .paths import CONFIG_PATH, DEFAULT_INSTANCE_CONTROL_PORT, ensure_dirs
 
 TIME_PATTERN = re.compile(r"^(\d{1,2}):(\d{1,2})$")
 
@@ -32,7 +32,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "start_url": "https://creator.douyin.com/creator-micro/data/following/chat",
     "match_mode": "equals",
     "headless": False,
-    "control_api_port": 8791,
+    "control_api_port": DEFAULT_INSTANCE_CONTROL_PORT,
     "send_timeout_seconds": 120,
     "badge_renewal_enabled": False,
     "badge_live_urls": [],
@@ -75,7 +75,16 @@ def normalize_config(raw: Dict[str, Any]) -> Dict[str, Any]:
     merged["missed_grace_minutes"] = max(0, _to_int(merged.get("missed_grace_minutes"), 180))
     merged["retry_interval_minutes"] = max(1, _to_int(merged.get("retry_interval_minutes"), 10))
     merged["max_attempts_per_day"] = min(10, max(1, _to_int(merged.get("max_attempts_per_day"), 3)))
-    merged["control_api_port"] = min(65500, max(1024, _to_int(merged.get("control_api_port"), 8791)))
+    merged["control_api_port"] = min(
+        65500,
+        max(
+            1024,
+            _to_int(
+                merged.get("control_api_port"),
+                DEFAULT_INSTANCE_CONTROL_PORT,
+            ),
+        ),
+    )
     merged["send_timeout_seconds"] = max(30, _to_int(merged.get("send_timeout_seconds"), 120))
     merged["badge_renewal_enabled"] = bool(merged.get("badge_renewal_enabled"))
     try:

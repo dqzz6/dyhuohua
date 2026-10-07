@@ -11,10 +11,22 @@ from .cdp import CdpClient
 class BrowserBridge:
     """业务层只跟这个对象打交道，不直接碰 Qt 控件，保证线程安全。"""
 
-    def __init__(self, debug_port: int, logger=None):
+    def __init__(
+        self,
+        debug_port: int,
+        logger=None,
+        *,
+        target_index: int = 0,
+        target_url_contains: str = "",
+    ):
         self._port = int(debug_port)
         self._logger = logger
-        self._cdp = CdpClient(self._port, logger)
+        self._cdp = CdpClient(
+            self._port,
+            logger,
+            target_index=target_index,
+            target_url_contains=target_url_contains,
+        )
 
     @property
     def port(self) -> int:

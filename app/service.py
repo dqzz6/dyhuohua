@@ -84,7 +84,18 @@ class Application:
         self.badge_store = BadgeRenewalStore()
         self.config: Dict[str, Any] = load_config()
         self.selectors = load_selectors()
-        self.browser = BrowserBridge(debug_port, logger=self.logger)
+        self.browser = BrowserBridge(
+            debug_port,
+            logger=self.logger,
+            target_index=0,
+            target_url_contains="creator.douyin.com",
+        )
+        self.live_browser = BrowserBridge(
+            debug_port,
+            logger=self.logger,
+            target_index=1,
+            target_url_contains="live.douyin.com",
+        )
         self.network = NetworkCapture(self.browser.cdp, logger=self.logger)
         self.scheduler = DailyScheduler(self.config_snapshot, self._scheduled_run, self.store, self.logger)
         self.badge_monitor = BadgeRenewalMonitor(
@@ -98,6 +109,7 @@ class Application:
         self._send_lock: Optional[asyncio.Lock] = None
         self._badge_lock: Optional[asyncio.Lock] = None
         self._browser_lock: Optional[asyncio.Lock] = None
+        self._live_lock: Optional[asyncio.Lock] = None
         self._boot: Optional[concurrent.futures.Future] = None
         self._last_result: Dict[str, Any] = {}
         self._last_badge_result: Dict[str, Any] = {}
@@ -117,8 +129,10 @@ class Application:
         self._send_lock = asyncio.Lock()
         self._badge_lock = asyncio.Lock()
         self._browser_lock = asyncio.Lock()
+        self._live_lock = asyncio.Lock()
         try:
             await self.browser.start()
+            await self.live_browser.start()
             await self.network.start()
         except Exception as exc:
             self.logger.error(f"接管内置浏览器失败：{exc}")
@@ -163,6 +177,7 @@ class Application:
         await self.badge_monitor.stop()
         await self.scheduler.stop()
         await self.browser.stop()
+        await self.live_browser.stop()
 
     # ---------- 配置 ----------
     def config_snapshot(self) -> Dict[str, Any]:
@@ -202,12 +217,14 @@ class Application:
 
     async def status(self) -> Dict[str, Any]:
         browser_status = await self.browser.status()
+        live_browser_status = await self.live_browser.status()
         today = self.store.today_key()
         next_run = self.scheduler.next_run_at()
         targets = self._targets()
         success = [name for name in targets if self.store.is_success(today, name)]
         return {
             "browser": browser_status,
+            "live_browser": live_browser_status,
             "logged_in": await self._guess_logged_in(),
             "config": self.config_snapshot(),
             "today": {
@@ -489,8 +506,8 @@ class Application:
     ) -> Dict[str, Any]:
         if self._badge_lock is None:
             self._badge_lock = asyncio.Lock()
-        if self._browser_lock is None:
-            self._browser_lock = asyncio.Lock()
+        if self._live_lock is None:
+            self._live_lock = asyncio.Lock()
 
         async with self._badge_lock:
             config = self.config_snapshot()
@@ -532,10 +549,10 @@ class Application:
                     continue
 
                 self.logger.info(f"开始续灯牌（{reason}）：{live_url}")
-                async with self._browser_lock:
+                async with self._live_lock:
                     try:
                         result = await renew_badge_in_live_room(
-                            self.browser,
+                            self.live_browser,
                             live_url,
                             watch_minutes,
                             self.logger,
@@ -548,11 +565,6 @@ class Application:
                             "watchedSeconds": 0,
                         }
                         self.logger.exception(f"续灯牌任务异常：{live_url}")
-                    finally:
-                        try:
-                            await self.browser.goto(self.start_url())
-                        except Exception as exc:
-                            self.logger.warning(f"续灯牌结束后恢复私信页失败：{exc}")
 
                 status = str(result.get("status") or "failed")
                 detail = str(result.get("detail") or "")
@@ -598,8 +610,8 @@ class Application:
         """实际赠送一次灯牌用于测试，不进入挂机且不受当日成功状态限制。"""
         if self._badge_lock is None:
             self._badge_lock = asyncio.Lock()
-        if self._browser_lock is None:
-            self._browser_lock = asyncio.Lock()
+        if self._live_lock is None:
+            self._live_lock = asyncio.Lock()
 
         async with self._badge_lock:
             config = self.config_snapshot()
@@ -612,11 +624,10 @@ class Application:
                 return {"ok": False, "detail": "没有配置需要测试的直播间地址", "results": []}
 
             live_url = live_urls[0]
-            self.logger.info(f"开始测试赠送灯牌：{live_url}")
-            async with self._browser_lock:
+            async with self._live_lock:
                 try:
                     result = await test_badge_gift_in_live_room(
-                        self.browser,
+                        self.live_browser,
                         live_url,
                         self.logger,
                     )
@@ -628,11 +639,6 @@ class Application:
                         "watchedSeconds": 0,
                     }
                     self.logger.exception(f"测试赠送灯牌异常：{live_url}")
-                finally:
-                    try:
-                        await self.browser.goto(self.start_url())
-                    except Exception as exc:
-                        self.logger.warning(f"测试赠送灯牌后恢复私信页失败：{exc}")
 
             status = str(result.get("status") or "failed")
             detail = str(result.get("detail") or "")
@@ -700,8 +706,22 @@ class Application:
         return text
 
     async def pages_info(self) -> Any:
-        status = await self.browser.status()
-        return [{"index": 0, "url": status.get("url", ""), "title": status.get("title", "")}]
+        chat = await self.browser.status()
+        live = await self.live_browser.status()
+        return [
+            {
+                "index": 0,
+                "name": "私信浏览器",
+                "url": chat.get("url", ""),
+                "title": chat.get("title", ""),
+            },
+            {
+                "index": 1,
+                "name": "直播浏览器",
+                "url": live.get("url", ""),
+                "title": live.get("title", ""),
+            },
+        ]
 
     # ---------- 运行信息 ----------
     def _write_runtime(self) -> None:

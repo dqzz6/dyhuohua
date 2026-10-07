@@ -38,16 +38,27 @@ def prepare_debug_port() -> int:
 class EmbeddedBrowser(QWebEngineView):
     """软件窗口内的浏览器视图，登录状态保存在 data/browser-profile。"""
 
-    def __init__(self, profile_dir: Path, parent=None):
+    def __init__(
+        self,
+        profile_dir: Path,
+        parent=None,
+        *,
+        profile_name: str = "抖音自动消息",
+        profile: QWebEngineProfile = None,
+    ):
         super().__init__(parent)
-        self._profile = self._create_profile(Path(profile_dir))
+        self._profile = profile or self._create_profile(Path(profile_dir), profile_name)
         self._page = QWebEnginePage(self._profile, self)
         self.setPage(self._page)
         self._enable_features()
 
-    def _create_profile(self, profile_dir: Path) -> QWebEngineProfile:
+    @property
+    def profile(self) -> QWebEngineProfile:
+        return self._profile
+
+    def _create_profile(self, profile_dir: Path, profile_name: str) -> QWebEngineProfile:
         profile_dir.mkdir(parents=True, exist_ok=True)
-        profile = QWebEngineProfile("抖音自动消息", self)
+        profile = QWebEngineProfile(str(profile_name), self)
         profile.setPersistentStoragePath(str(profile_dir))
         profile.setCachePath(str(profile_dir / "缓存"))
         profile.setPersistentCookiesPolicy(

@@ -33,10 +33,20 @@ class CdpError(RuntimeError):
 class CdpClient:
     """一条 WebSocket 连接上串行发请求、并行收事件，全部在同一事件循环里。"""
 
-    def __init__(self, port: int, logger=None, host: str = "127.0.0.1"):
+    def __init__(
+        self,
+        port: int,
+        logger=None,
+        host: str = "127.0.0.1",
+        *,
+        target_index: int = 0,
+        target_url_contains: str = "",
+    ):
         self._port = int(port)
         self._host = host
         self._logger = logger
+        self._target_index = max(0, int(target_index))
+        self._target_url_contains = str(target_url_contains or "").strip().lower()
         self._ws = None
         self._session_id: Optional[str] = None
         self._counter = 0
@@ -142,9 +152,21 @@ class CdpClient:
         page_targets = [item for item in targets.get("targetInfos", []) if item.get("type") == "page"]
         if not page_targets:
             raise CdpError("内置浏览器还没有加载出可用页面")
+        if self._target_url_contains:
+            matched = [
+                item
+                for item in page_targets
+                if self._target_url_contains in str(item.get("url") or "").lower()
+            ]
+            if matched:
+                page_targets = matched
+        if self._target_index < len(page_targets):
+            target = page_targets[self._target_index]
+        else:
+            target = page_targets[0]
         attached = await self._send_raw(
             "Target.attachToTarget",
-            {"targetId": page_targets[0]["targetId"], "flatten": True},
+            {"targetId": target["targetId"], "flatten": True},
         )
         session_id = str(attached.get("sessionId") or "")
         if not session_id:
