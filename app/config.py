@@ -8,6 +8,13 @@ import re
 import threading
 from typing import Any, Dict
 
+from .badge_renewal import (
+    DEFAULT_CHECK_INTERVAL_MINUTES,
+    DEFAULT_WATCH_MINUTES,
+    MAX_CHECK_INTERVAL_MINUTES,
+    MAX_WATCH_MINUTES,
+)
+from .badge_renewal import normalize_live_urls
 from .paths import CONFIG_PATH, ensure_dirs
 
 TIME_PATTERN = re.compile(r"^(\d{1,2}):(\d{1,2})$")
@@ -27,6 +34,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "headless": False,
     "control_api_port": 8791,
     "send_timeout_seconds": 120,
+    "badge_renewal_enabled": False,
+    "badge_live_urls": [],
+    "badge_check_interval_minutes": DEFAULT_CHECK_INTERVAL_MINUTES,
+    "badge_watch_minutes": DEFAULT_WATCH_MINUTES,
 }
 
 _lock = threading.RLock()
@@ -66,6 +77,19 @@ def normalize_config(raw: Dict[str, Any]) -> Dict[str, Any]:
     merged["max_attempts_per_day"] = min(10, max(1, _to_int(merged.get("max_attempts_per_day"), 3)))
     merged["control_api_port"] = min(65500, max(1024, _to_int(merged.get("control_api_port"), 8791)))
     merged["send_timeout_seconds"] = max(30, _to_int(merged.get("send_timeout_seconds"), 120))
+    merged["badge_renewal_enabled"] = bool(merged.get("badge_renewal_enabled"))
+    try:
+        merged["badge_live_urls"] = normalize_live_urls(merged.get("badge_live_urls"))
+    except ValueError:
+        merged["badge_live_urls"] = []
+    merged["badge_check_interval_minutes"] = min(
+        MAX_CHECK_INTERVAL_MINUTES,
+        max(1, _to_int(merged.get("badge_check_interval_minutes"), DEFAULT_CHECK_INTERVAL_MINUTES)),
+    )
+    merged["badge_watch_minutes"] = min(
+        MAX_WATCH_MINUTES,
+        max(1, _to_int(merged.get("badge_watch_minutes"), DEFAULT_WATCH_MINUTES)),
+    )
     merged["start_url"] = str(merged.get("start_url") or DEFAULT_CONFIG["start_url"]).strip()
     merged.pop("target_name", None)
     return merged

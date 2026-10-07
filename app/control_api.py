@@ -156,6 +156,23 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, "data": self._run(app.capture_reload(), 120)})
             elif method == "GET" and path == "/history":
                 self._send_json({"ok": True, "data": app.store.history(50)})
+            elif method == "GET" and path == "/badge":
+                self._send_json({"ok": True, "data": app.badge_status_snapshot()})
+            elif method == "GET" and path == "/badge/history":
+                self._send_json({"ok": True, "data": app.badge_store.history(50)})
+            elif method == "POST" and path == "/badge/run":
+                raw_urls = body.get("urls")
+                urls = raw_urls if isinstance(raw_urls, list) else None
+                watch_minutes = int(app.config_snapshot().get("badge_watch_minutes") or 20)
+                data = self._run(
+                    app.run_badge_renewal(
+                        urls=urls,
+                        force=bool(body.get("force", True)),
+                        reason="本地接口",
+                    ),
+                    max(2400, watch_minutes * 60 + 180),
+                )
+                self._send_json({"ok": True, "data": data})
             else:
                 self._send_json({"ok": False, "error": f"未知接口：{method} {path}"}, 404)
         except Exception as exc:

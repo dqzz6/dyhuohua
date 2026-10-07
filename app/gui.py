@@ -24,11 +24,13 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QRadioButton,
+    QSpinBox,
     QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
+from .badge_renewal import normalize_live_urls
 from .embedded import EmbeddedBrowser
 from .friends import normalize_key, read_cache
 from .logger import recent_lines
@@ -68,6 +70,7 @@ class MainWindow(QMainWindow):
 
     send_finished = Signal(dict)
     friends_ready = Signal(dict)
+    badge_finished = Signal(dict)
 
     def __init__(self, app: Application, browser: EmbeddedBrowser):
         super().__init__()
@@ -111,6 +114,7 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self._build_status_group())
         layout.addWidget(self._build_settings_group())
+        layout.addWidget(self._build_badge_group())
         layout.addWidget(self._build_friends_group(), 5)
         layout.addLayout(self._build_buttons())
         layout.addWidget(self._build_log_group(), 2)
@@ -126,9 +130,16 @@ class MainWindow(QMainWindow):
         self.label_login = QLabel("未知")
         self.label_today = QLabel("未发送")
         self.label_next = QLabel("-")
+        self.label_badge = QLabel("未开启")
         bold = QFont()
         bold.setBold(True)
-        for label in (self.label_browser, self.label_login, self.label_today, self.label_next):
+        for label in (
+            self.label_browser,
+            self.label_login,
+            self.label_today,
+            self.label_next,
+            self.label_badge,
+        ):
             label.setFont(bold)
 
         rows = (
@@ -136,6 +147,7 @@ class MainWindow(QMainWindow):
             ("登录状态", self.label_login),
             ("今日发送", self.label_today),
             ("下次发送", self.label_next),
+            ("续灯牌", self.label_badge),
         )
         for row, (title, widget) in enumerate(rows):
             grid.addWidget(QLabel(title), row, 0)
@@ -180,6 +192,42 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.input_message, 4, 1, 1, 2)
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(2, 1)
+        return group
+
+    def _build_badge_group(self) -> QGroupBox:
+        group = QGroupBox("自动续粉丝灯牌")
+        grid = QGridLayout(group)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(6)
+
+        self.check_badge_enabled = QCheckBox("开启定时监控直播间")
+        self.input_badge_urls = QPlainTextEdit()
+        self.input_badge_urls.setFixedHeight(54)
+        self.input_badge_urls.setPlaceholderText(
+            "每行一个直播间地址，例如：\nhttps://live.douyin.com/114687942812"
+        )
+        self.spin_badge_interval = QSpinBox()
+        self.spin_badge_interval.setRange(1, 1440)
+        self.spin_badge_interval.setSuffix(" 分钟")
+        self.spin_badge_interval.setFixedWidth(112)
+        self.spin_badge_watch = QSpinBox()
+        self.spin_badge_watch.setRange(1, 180)
+        self.spin_badge_watch.setSuffix(" 分钟")
+        self.spin_badge_watch.setFixedWidth(112)
+        self.button_badge_test = QPushButton("立即检测一次")
+        self.label_badge_hint = QLabel("默认每 10 分钟检测一次；确认开播后自动续灯牌，并挂满 20 分钟。")
+        self.label_badge_hint.setWordWrap(True)
+
+        grid.addWidget(self.check_badge_enabled, 0, 0, 1, 4)
+        grid.addWidget(QLabel("主播直播间"), 1, 0, Qt.AlignmentFlag.AlignTop)
+        grid.addWidget(self.input_badge_urls, 1, 1, 1, 3)
+        grid.addWidget(QLabel("检测间隔"), 2, 0)
+        grid.addWidget(self.spin_badge_interval, 2, 1)
+        grid.addWidget(QLabel("开播后挂机"), 2, 2)
+        grid.addWidget(self.spin_badge_watch, 2, 3)
+        grid.addWidget(self.button_badge_test, 3, 1, 1, 2)
+        grid.addWidget(self.label_badge_hint, 4, 0, 1, 4)
+        grid.setColumnStretch(1, 1)
         return group
 
     def _build_friends_group(self) -> QGroupBox:
@@ -256,8 +304,13 @@ class MainWindow(QMainWindow):
         self.list_selected.itemDoubleClicked.connect(self._remove_selected_item)
         self.radio_random.toggled.connect(self._update_message_hint)
         self.input_message.textChanged.connect(self._update_message_hint)
+        self.check_badge_enabled.toggled.connect(self._update_badge_hint)
+        self.spin_badge_interval.valueChanged.connect(self._update_badge_hint)
+        self.spin_badge_watch.valueChanged.connect(self._update_badge_hint)
+        self.button_badge_test.clicked.connect(self._badge_test_clicked)
         self.send_finished.connect(self._on_send_finished)
         self.friends_ready.connect(self._on_friends_ready)
+        self.badge_finished.connect(self._on_badge_finished)
 
     # ---------- 表单数据 ----------
     def _load_form(self) -> None:
@@ -270,7 +323,14 @@ class MainWindow(QMainWindow):
             self.radio_random.setChecked(True)
         else:
             self.radio_whole.setChecked(True)
+        self.check_badge_enabled.setChecked(bool(config.get("badge_renewal_enabled")))
+        self.input_badge_urls.setPlainText(
+            "\n".join(str(url) for url in (config.get("badge_live_urls") or []))
+        )
+        self.spin_badge_interval.setValue(int(config.get("badge_check_interval_minutes") or 10))
+        self.spin_badge_watch.setValue(int(config.get("badge_watch_minutes") or 20))
         self._update_message_hint()
+        self._update_badge_hint()
         self._selected_names = {str(name) for name in (config.get("target_names") or [])}
 
     def _update_message_hint(self) -> None:
@@ -283,6 +343,17 @@ class MainWindow(QMainWindow):
         else:
             lines = len([line for line in text.splitlines() if line.strip()])
             self.label_message_hint.setText(f"当前 {lines} 行，会作为一条消息整体发出")
+
+    def _update_badge_hint(self) -> None:
+        if self.check_badge_enabled.isChecked():
+            self.label_badge_hint.setText(
+                f"已开启：每 {self.spin_badge_interval.value()} 分钟检测一次，"
+                f"开播后续灯牌并挂满 {self.spin_badge_watch.value()} 分钟。"
+            )
+        else:
+            self.label_badge_hint.setText(
+                "默认每 10 分钟检测一次；开启后，确认开播会自动续灯牌并挂满设定时长。"
+            )
 
     def _load_cached_friends(self) -> None:
         cached = read_cache()
@@ -420,6 +491,9 @@ class MainWindow(QMainWindow):
     def _save(self) -> bool:
         names = self._checked_names()
         try:
+            badge_urls = normalize_live_urls(self.input_badge_urls.toPlainText())
+            if self.check_badge_enabled.isChecked() and not badge_urls:
+                raise ValueError("开启自动续灯牌前，请至少填写一个 live.douyin.com 直播间地址")
             self.app.update_config(
                 {
                     "target_names": names,
@@ -428,6 +502,10 @@ class MainWindow(QMainWindow):
                     "send_time": self.input_time.text().strip(),
                     "daily_enabled": self.check_daily.isChecked(),
                     "missed_run": self.check_missed.isChecked(),
+                    "badge_renewal_enabled": self.check_badge_enabled.isChecked(),
+                    "badge_live_urls": badge_urls,
+                    "badge_check_interval_minutes": self.spin_badge_interval.value(),
+                    "badge_watch_minutes": self.spin_badge_watch.value(),
                 }
             )
         except ValueError as exc:
@@ -526,6 +604,30 @@ class MainWindow(QMainWindow):
 
         threading.Thread(target=worker, name="manual-send", daemon=True).start()
 
+    def _badge_test_clicked(self) -> None:
+        if not self._save():
+            return
+        urls = normalize_live_urls(self.input_badge_urls.toPlainText())
+        if not urls:
+            QMessageBox.warning(self, "提示", "请先填写至少一个直播间地址")
+            return
+        self._set_busy(True)
+
+        def worker() -> None:
+            try:
+                result = self.app.submit(
+                    self.app.run_badge_renewal(
+                        urls=urls,
+                        force=True,
+                        reason="界面手动检测",
+                    )
+                ).result(timeout=2400)
+            except Exception as exc:
+                result = {"ok": False, "detail": str(exc), "results": []}
+            self.badge_finished.emit(result)
+
+        threading.Thread(target=worker, name="manual-badge-renewal", daemon=True).start()
+
     def _on_send_finished(self, result: dict) -> None:
         self._set_busy(False)
         detail = str(result.get("detail") or "未知原因")
@@ -533,6 +635,14 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "发送完成", detail)
         else:
             QMessageBox.critical(self, "发送失败", detail)
+
+    def _on_badge_finished(self, result: dict) -> None:
+        self._set_busy(False)
+        detail = str(result.get("detail") or "未知原因")
+        if result.get("ok"):
+            QMessageBox.information(self, "续灯牌检测完成", detail)
+        else:
+            QMessageBox.critical(self, "续灯牌检测失败", detail)
 
     def _open_data_dir(self) -> None:
         try:
@@ -542,7 +652,13 @@ class MainWindow(QMainWindow):
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
-        for button in (self.button_save, self.button_reload, self.button_send, self.button_scan):
+        for button in (
+            self.button_save,
+            self.button_reload,
+            self.button_send,
+            self.button_scan,
+            self.button_badge_test,
+        ):
             button.setEnabled(not busy)
 
     # ---------- 状态与日志刷新 ----------
@@ -576,10 +692,37 @@ class MainWindow(QMainWindow):
             self.label_today.setText(f"{sent_count}/{total} 已发送" if total else "未设置好友")
             next_run = str(status.get("next_run_at") or "")
             self.label_next.setText(next_run[5:16].replace("T", " ") if len(next_run) >= 16 else "-")
+            self._refresh_badge_status(status.get("badge") or {})
             self._maybe_auto_scan(logged_in)
 
         self.text_log.setPlainText("\n".join(recent_lines(300)))
         self.text_log.verticalScrollBar().setValue(self.text_log.verticalScrollBar().maximum())
+
+    def _refresh_badge_status(self, badge: dict) -> None:
+        if not badge.get("enabled"):
+            self.label_badge.setText("未开启")
+            return
+        if badge.get("running"):
+            self.label_badge.setText("检测中")
+            return
+        states = badge.get("states") or {}
+        latest_status = ""
+        for entry in states.values():
+            if isinstance(entry, dict) and entry.get("status"):
+                latest_status = str(entry.get("status"))
+                break
+        if latest_status == "sent":
+            self.label_badge.setText("已续灯牌")
+        elif latest_status == "not_live":
+            self.label_badge.setText("等待开播")
+        elif latest_status == "failed":
+            self.label_badge.setText("检测失败")
+        else:
+            next_check = str(badge.get("next_check_at") or "")
+            if len(next_check) >= 16:
+                self.label_badge.setText(f"等待检测 {next_check[11:16]}")
+            else:
+                self.label_badge.setText("等待检测")
 
     def _maybe_auto_scan(self, logged_in) -> None:
         """登录成功后自动读取一次好友列表。"""
@@ -591,7 +734,11 @@ class MainWindow(QMainWindow):
 
     # ---------- 生命周期 ----------
     def closeEvent(self, event) -> None:  # noqa: N802
-        confirm = QMessageBox.question(self, "退出确认", "退出后定时发送将停止，确定要退出吗？")
+        confirm = QMessageBox.question(
+            self,
+            "退出确认",
+            "退出后定时发送和自动续灯牌都会停止，确定要退出吗？",
+        )
         if confirm != QMessageBox.StandardButton.Yes:
             event.ignore()
             return

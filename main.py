@@ -31,7 +31,7 @@ def already_running_url(timeout: float = 2.0):
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="抖音自动消息：内置浏览器 + 每日定时发送")
+    parser = argparse.ArgumentParser(description="抖音自动消息：内置浏览器 + 定时发送 + 自动续灯牌")
     parser.add_argument("--port", type=int, default=0, help="本地控制接口端口，0 表示使用配置文件里的值")
     parser.add_argument("--selftest", action="store_true", help="只做逻辑自检，不启动内置浏览器")
     parser.add_argument("--selftest-browser", action="store_true", help="逻辑自检并完整跑一遍内置浏览器流程")

@@ -1,4 +1,4 @@
-"""应用装配：异步工作线程 + 内置浏览器桥接 + 每日定时 + 本地控制接口。"""
+"""应用装配：异步工作线程 + 内置浏览器桥接 + 每日发送 + 自动续灯牌 + 本地控制接口。"""
 
 from __future__ import annotations
 
@@ -11,6 +11,12 @@ import threading
 from datetime import datetime
 from typing import Any, Coroutine, Dict, List, Optional
 
+from .badge_renewal import (
+    BadgeRenewalMonitor,
+    BadgeRenewalStore,
+    normalize_live_urls,
+    renew_badge_in_live_room,
+)
 from .browser import BrowserBridge
 from .config import load_config, save_config
 from .control_api import ControlServer
@@ -73,17 +79,26 @@ class Application:
         ensure_dirs()
         self.logger = setup_logger(LOG_DIR)
         self.store = SendStore()
+        self.badge_store = BadgeRenewalStore()
         self.config: Dict[str, Any] = load_config()
         self.selectors = load_selectors()
         self.browser = BrowserBridge(debug_port, logger=self.logger)
         self.network = NetworkCapture(self.browser.cdp, logger=self.logger)
         self.scheduler = DailyScheduler(self.config_snapshot, self._scheduled_run, self.store, self.logger)
+        self.badge_monitor = BadgeRenewalMonitor(
+            self.config_snapshot,
+            self._scheduled_badge_run,
+            self.logger,
+        )
         self.worker = _AsyncWorker()
         self.control: Optional[ControlServer] = None
         self.token = secrets.token_urlsafe(24)
         self._send_lock: Optional[asyncio.Lock] = None
+        self._badge_lock: Optional[asyncio.Lock] = None
+        self._browser_lock: Optional[asyncio.Lock] = None
         self._boot: Optional[concurrent.futures.Future] = None
         self._last_result: Dict[str, Any] = {}
+        self._last_badge_result: Dict[str, Any] = {}
         self._stopped = False
 
     # ---------- 生命周期 ----------
@@ -97,6 +112,8 @@ class Application:
 
     async def _bootstrap(self) -> None:
         self._send_lock = asyncio.Lock()
+        self._badge_lock = asyncio.Lock()
+        self._browser_lock = asyncio.Lock()
         try:
             await self.browser.start()
             await self.network.start()
@@ -104,6 +121,12 @@ class Application:
             self.logger.error(f"接管内置浏览器失败：{exc}")
         self.scheduler.start()
         self.logger.info(f"服务已就绪，设定的每日发送时间为 {self.config['send_time']}")
+        self.badge_monitor.start()
+        if self.config.get("badge_renewal_enabled"):
+            self.logger.info(
+                f"自动续灯牌已开启：每 {self.config['badge_check_interval_minutes']} 分钟检测，"
+                f"开播后挂机 {self.config['badge_watch_minutes']} 分钟"
+            )
 
     def wait_boot(self, timeout: float = 90.0) -> None:
         if self._boot is not None:
@@ -134,6 +157,7 @@ class Application:
         self.logger.info("程序已退出")
 
     async def _shutdown(self) -> None:
+        await self.badge_monitor.stop()
         await self.scheduler.stop()
         await self.browser.stop()
 
@@ -192,6 +216,24 @@ class Application:
             },
             "next_run_at": next_run.isoformat(timespec="seconds") if next_run else "",
             "last_result": dict(self._last_result),
+            "badge": self.badge_status_snapshot(),
+        }
+
+    def badge_status_snapshot(self) -> Dict[str, Any]:
+        config = self.config_snapshot()
+        live_urls = list(config.get("badge_live_urls") or [])
+        interval = int(config.get("badge_check_interval_minutes") or 10)
+        next_check = self.badge_store.next_check_at(live_urls, interval)
+        return {
+            "enabled": bool(config.get("badge_renewal_enabled")),
+            "urls": live_urls,
+            "check_interval_minutes": interval,
+            "watch_minutes": int(config.get("badge_watch_minutes") or 20),
+            "running": self.badge_monitor.running,
+            "next_check_at": next_check.isoformat(timespec="seconds") if next_check else "",
+            "states": {url: self.badge_store.get(url) for url in live_urls},
+            "latest": {url: self.badge_store.latest(url) for url in live_urls},
+            "last_result": dict(self._last_badge_result),
         }
 
     # ---------- 发送 ----------
@@ -320,84 +362,96 @@ class Application:
     ) -> Dict[str, Any]:
         if self._send_lock is None:
             self._send_lock = asyncio.Lock()
+        if self._browser_lock is None:
+            self._browser_lock = asyncio.Lock()
         async with self._send_lock:
-            names = self._resolve_targets(targets)
-            content = (message or self.config.get("message") or "").strip()
-            message_mode = normalize_mode(self.config.get("message_mode"))
-            timeout_seconds = int(self.config.get("send_timeout_seconds") or 120)
-            if not names:
-                detail = "没有可发送的好友，请先读取好友列表并勾选"
-                self.logger.error(f"发送失败（no_target）：{detail}")
-                payload = {"ok": False, "code": "no_target", "detail": detail, "results": []}
-                self._last_result = payload
-                return payload
+            async with self._browser_lock:
+                return await self._run_send_locked(targets, message, reason, force)
 
-            mode_label = "随机抽一行" if message_mode == "random_line" else "整条发送"
-            self.logger.info(f"开始发送（{reason}）：共 {len(names)} 位好友，发送方式：{mode_label}")
-            await self._ensure_chat_page()
-
-            results: List[Dict[str, Any]] = []
-            stopped_early = False
-            for index, name in enumerate(names, start=1):
-                today = self.store.today_key()
-                if not force and self.store.is_success(today, name):
-                    continue
-                sent_message = pick_message(content, message_mode, self.store.last_sent_message(name))
-                if not sent_message:
-                    results.append(self._failure("empty_message", "消息内容为空", name, content, reason))
-                    continue
-                self.logger.info(
-                    f"[{index}/{len(names)}] 正在给「{name}」发送消息：{sent_message[:30]}"
-                )
-                try:
-                    result = await asyncio.wait_for(
-                        send_message(
-                            self.browser,
-                            name,
-                            sent_message,
-                            self.selectors,
-                            self.logger,
-                            match_mode=str(self.config.get("match_mode") or "equals"),
-                            timeout_seconds=timeout_seconds,
-                        ),
-                        timeout=timeout_seconds,
-                    )
-                except LoginRequiredError as exc:
-                    results.append(self._failure("login_required", str(exc), name, sent_message, reason))
-                    stopped_early = True
-                    break
-                except SendError as exc:
-                    results.append(self._failure("send_failed", str(exc), name, sent_message, reason))
-                except asyncio.TimeoutError:
-                    results.append(
-                        self._failure("timeout", f"发送超时（{timeout_seconds} 秒）", name, sent_message, reason)
-                    )
-                except Exception as exc:
-                    results.append(self._failure(type(exc).__name__, str(exc), name, sent_message, reason))
-                else:
-                    detail = str(result.get("detail") or "")
-                    self.store.record("success", name, sent_message, detail, reason)
-                    results.append({"ok": True, "target": name, "detail": detail, "message": sent_message})
-                    self.logger.info(f"「{name}」发送成功：{detail}")
-                await asyncio.sleep(1.0)
-
-            success_count = sum(1 for item in results if item.get("ok"))
-            failed_names = [str(item.get("target")) for item in results if not item.get("ok")]
-            detail = f"成功 {success_count} 位，失败 {len(failed_names)} 位"
-            if stopped_early:
-                detail += "；登录状态失效，已提前终止"
-            if failed_names:
-                detail += f"（失败：{'、'.join(failed_names[:5])}）"
-            payload = {
-                "ok": bool(results) and not failed_names,
-                "detail": detail,
-                "results": results,
-                "successCount": success_count,
-                "failed": failed_names,
-                "reason": reason,
-            }
+    async def _run_send_locked(
+        self,
+        targets: Optional[List[str]],
+        message: str,
+        reason: str,
+        force: bool,
+    ) -> Dict[str, Any]:
+        names = self._resolve_targets(targets)
+        content = (message or self.config.get("message") or "").strip()
+        message_mode = normalize_mode(self.config.get("message_mode"))
+        timeout_seconds = int(self.config.get("send_timeout_seconds") or 120)
+        if not names:
+            detail = "没有可发送的好友，请先读取好友列表并勾选"
+            self.logger.error(f"发送失败（no_target）：{detail}")
+            payload = {"ok": False, "code": "no_target", "detail": detail, "results": []}
             self._last_result = payload
             return payload
+
+        mode_label = "随机抽一行" if message_mode == "random_line" else "整条发送"
+        self.logger.info(f"开始发送（{reason}）：共 {len(names)} 位好友，发送方式：{mode_label}")
+        await self._ensure_chat_page()
+
+        results: List[Dict[str, Any]] = []
+        stopped_early = False
+        for index, name in enumerate(names, start=1):
+            today = self.store.today_key()
+            if not force and self.store.is_success(today, name):
+                continue
+            sent_message = pick_message(content, message_mode, self.store.last_sent_message(name))
+            if not sent_message:
+                results.append(self._failure("empty_message", "消息内容为空", name, content, reason))
+                continue
+            self.logger.info(
+                f"[{index}/{len(names)}] 正在给「{name}」发送消息：{sent_message[:30]}"
+            )
+            try:
+                result = await asyncio.wait_for(
+                    send_message(
+                        self.browser,
+                        name,
+                        sent_message,
+                        self.selectors,
+                        self.logger,
+                        match_mode=str(self.config.get("match_mode") or "equals"),
+                        timeout_seconds=timeout_seconds,
+                    ),
+                    timeout=timeout_seconds,
+                )
+            except LoginRequiredError as exc:
+                results.append(self._failure("login_required", str(exc), name, sent_message, reason))
+                stopped_early = True
+                break
+            except SendError as exc:
+                results.append(self._failure("send_failed", str(exc), name, sent_message, reason))
+            except asyncio.TimeoutError:
+                results.append(
+                    self._failure("timeout", f"发送超时（{timeout_seconds} 秒）", name, sent_message, reason)
+                )
+            except Exception as exc:
+                results.append(self._failure(type(exc).__name__, str(exc), name, sent_message, reason))
+            else:
+                detail = str(result.get("detail") or "")
+                self.store.record("success", name, sent_message, detail, reason)
+                results.append({"ok": True, "target": name, "detail": detail, "message": sent_message})
+                self.logger.info(f"「{name}」发送成功：{detail}")
+            await asyncio.sleep(1.0)
+
+        success_count = sum(1 for item in results if item.get("ok"))
+        failed_names = [str(item.get("target")) for item in results if not item.get("ok")]
+        detail = f"成功 {success_count} 位，失败 {len(failed_names)} 位"
+        if stopped_early:
+            detail += "；登录状态失效，已提前终止"
+        if failed_names:
+            detail += f"（失败：{'、'.join(failed_names[:5])}）"
+        payload = {
+            "ok": bool(results) and not failed_names,
+            "detail": detail,
+            "results": results,
+            "successCount": success_count,
+            "failed": failed_names,
+            "reason": reason,
+        }
+        self._last_result = payload
+        return payload
 
     def _resolve_targets(self, targets: Optional[List[str]]) -> List[str]:
         if targets is None:
@@ -418,6 +472,124 @@ class Application:
 
     async def _scheduled_run(self, force: bool = False, reason: str = "定时任务") -> Dict[str, Any]:
         return await self.run_send_now(reason=reason, force=bool(force))
+
+    # ---------- 自动续灯牌 ----------
+    async def _scheduled_badge_run(self) -> Dict[str, Any]:
+        return await self.run_badge_renewal(force=False, reason="定时监控")
+
+    async def run_badge_renewal(
+        self,
+        urls: Optional[List[str]] = None,
+        *,
+        force: bool = False,
+        reason: str = "手动",
+    ) -> Dict[str, Any]:
+        if self._badge_lock is None:
+            self._badge_lock = asyncio.Lock()
+        if self._browser_lock is None:
+            self._browser_lock = asyncio.Lock()
+
+        async with self._badge_lock:
+            config = self.config_snapshot()
+            if urls is None:
+                if not config.get("badge_renewal_enabled"):
+                    return {
+                        "ok": False,
+                        "detail": "自动续灯牌未开启",
+                        "results": [],
+                    }
+                raw_urls = list(config.get("badge_live_urls") or [])
+            else:
+                raw_urls = list(urls)
+            try:
+                live_urls = normalize_live_urls(raw_urls)
+            except ValueError as exc:
+                return {"ok": False, "detail": str(exc), "results": []}
+            if not live_urls:
+                return {"ok": False, "detail": "没有配置需要监控的直播间地址", "results": []}
+
+            interval = int(config.get("badge_check_interval_minutes") or 10)
+            watch_minutes = int(config.get("badge_watch_minutes") or 20)
+            results: List[Dict[str, Any]] = []
+            for live_url in live_urls:
+                should_check, skip_reason = self.badge_store.should_check(
+                    live_url,
+                    interval,
+                    force=force,
+                )
+                if not should_check:
+                    results.append(
+                        {
+                            "ok": True,
+                            "status": "skipped",
+                            "liveUrl": live_url,
+                            "detail": skip_reason,
+                        }
+                    )
+                    continue
+
+                self.logger.info(f"开始续灯牌（{reason}）：{live_url}")
+                async with self._browser_lock:
+                    try:
+                        result = await renew_badge_in_live_room(
+                            self.browser,
+                            live_url,
+                            watch_minutes,
+                            self.logger,
+                        )
+                    except Exception as exc:
+                        result = {
+                            "status": "failed",
+                            "detail": f"{type(exc).__name__}：{exc}",
+                            "liveTitle": "",
+                            "watchedSeconds": 0,
+                        }
+                        self.logger.exception(f"续灯牌任务异常：{live_url}")
+                    finally:
+                        try:
+                            await self.browser.goto(self.start_url())
+                        except Exception as exc:
+                            self.logger.warning(f"续灯牌结束后恢复私信页失败：{exc}")
+
+                status = str(result.get("status") or "failed")
+                detail = str(result.get("detail") or "")
+                self.badge_store.record(
+                    live_url,
+                    status,
+                    detail,
+                    watched_seconds=int(result.get("watchedSeconds") or 0),
+                    live_title=str(result.get("liveTitle") or ""),
+                )
+                results.append(
+                    {
+                        "ok": status in {"sent", "not_live"},
+                        "status": status,
+                        "liveUrl": live_url,
+                        "detail": detail,
+                        "watchedSeconds": int(result.get("watchedSeconds") or 0),
+                    }
+                )
+                await asyncio.sleep(1.0)
+
+            sent_count = sum(1 for item in results if item.get("status") == "sent")
+            not_live_count = sum(1 for item in results if item.get("status") == "not_live")
+            failed_count = sum(1 for item in results if item.get("status") == "failed")
+            skipped_count = sum(1 for item in results if item.get("status") == "skipped")
+            detail_parts = [f"续灯牌成功 {sent_count} 个"]
+            if not_live_count:
+                detail_parts.append(f"未开播 {not_live_count} 个")
+            if failed_count:
+                detail_parts.append(f"失败 {failed_count} 个")
+            if skipped_count:
+                detail_parts.append(f"跳过 {skipped_count} 个")
+            payload = {
+                "ok": failed_count == 0,
+                "detail": "，".join(detail_parts),
+                "results": results,
+                "reason": reason,
+            }
+            self._last_badge_result = payload
+            return payload
 
     # ---------- 控制接口用到的页面操作 ----------
     async def evaluate_script(self, script: str) -> Any:

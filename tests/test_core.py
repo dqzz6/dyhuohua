@@ -11,6 +11,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app.badge_renewal import (  # noqa: E402
+    BadgeRenewalStore,
+    detect_live_status,
+    normalize_live_url,
+    normalize_live_urls,
+)
 from app.config import normalize_config, normalize_time  # noqa: E402
 from app.friends import extract_user_details, merge_friends, normalize_key  # noqa: E402
 from app.gui import filter_friend_names, order_selected_names  # noqa: E402
@@ -40,6 +46,99 @@ def test_normalize_config() -> None:
     assert config["daily_enabled"] is True
     assert config["match_mode"] == "equals"
     assert config["target_names"] == []
+    assert config["badge_renewal_enabled"] is False
+    assert config["badge_check_interval_minutes"] == 10
+    assert config["badge_watch_minutes"] == 20
+
+
+def test_badge_live_url_normalization() -> None:
+    assert normalize_live_url("114687942812") == "https://live.douyin.com/114687942812"
+    assert (
+        normalize_live_url("https://live.douyin.com/114687942812/")
+        == "https://live.douyin.com/114687942812"
+    )
+    assert normalize_live_urls(
+        "https://live.douyin.com/114687942812\n"
+        "https://live.douyin.com/114687942812\n"
+        "https://live.douyin.com/895627289314"
+    ) == [
+        "https://live.douyin.com/114687942812",
+        "https://live.douyin.com/895627289314",
+    ]
+    assert normalize_live_url("") == ""
+    for bad in ("https://www.douyin.com/user/demo", "live.douyin.com/"):
+        try:
+            normalize_live_url(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"非法直播间地址 {bad!r} 未被拦截")
+
+
+def test_badge_config_normalization() -> None:
+    config = normalize_config(
+        {
+            "badge_renewal_enabled": True,
+            "badge_live_urls": ["https://live.douyin.com/114687942812"],
+            "badge_check_interval_minutes": 0,
+            "badge_watch_minutes": 999,
+        }
+    )
+    assert config["badge_renewal_enabled"] is True
+    assert config["badge_live_urls"] == ["https://live.douyin.com/114687942812"]
+    assert config["badge_check_interval_minutes"] == 1
+    assert config["badge_watch_minutes"] == 180
+
+
+def test_badge_store_interval_and_daily_success() -> None:
+    with tempfile.TemporaryDirectory() as folder:
+        store = BadgeRenewalStore(Path(folder) / "badge_history.json")
+        live_url = "https://live.douyin.com/114687942812"
+        now = datetime(2026, 8, 30, 22, 0, tzinfo=BEIJING)
+        day = now.strftime("%Y-%m-%d")
+        should_check, reason = store.should_check(live_url, 10, now=now)
+        assert should_check is True and reason == ""
+
+        store.record(live_url, "not_live", "未开播", date_key=day, checked_at=now)
+        should_check, reason = store.should_check(live_url, 10, now=now)
+        assert should_check is False
+        assert reason == "未到下次检测时间"
+        assert store.should_check(live_url, 10, now=now, force=True)[0] is True
+
+        store.record(
+            live_url,
+            "sent",
+            "已续灯牌",
+            watched_seconds=1200,
+            date_key=day,
+            checked_at=now,
+        )
+        should_check, reason = store.should_check(live_url, 10, now=now, force=True)
+        assert should_check is False
+        assert reason == "今天已经续过灯牌"
+
+
+def test_detect_live_status() -> None:
+    assert detect_live_status(
+        {
+            "url": "https://live.douyin.com/114687942812",
+            "title": "主播的直播间",
+            "body": "在线观众 123 本场点赞 456",
+        }
+    )[0] is True
+    assert detect_live_status(
+        {
+            "url": "https://live.douyin.com/114687942812",
+            "title": "主播的直播间",
+            "body": "直播已结束",
+        }
+    )[0] is False
+    assert detect_live_status(
+        {
+            "url": "https://live.douyin.com/114687942812",
+            "title": "",
+            "body": "",
+        }
+    )[0] is False
 
 
 def test_target_names_migration_and_dedup() -> None:

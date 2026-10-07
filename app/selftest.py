@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import sys
 import tempfile
@@ -11,6 +12,12 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from .badge_renewal import (
+    BadgeRenewalStore,
+    detect_live_status,
+    normalize_live_url,
+    renew_badge_on_current_page,
+)
 from .config import normalize_config, normalize_time
 from .logger import BEIJING
 from .message import pick_message, split_candidates
@@ -43,6 +50,21 @@ def _check_config() -> None:
     _check(migrated["target_names"] == ["旧版好友"], "旧版单好友配置未迁移")
     deduped = normalize_config({"target_names": ["小明", "小明", " 小红 ", ""]})
     _check(deduped["target_names"] == ["小明", "小红"], "好友名去重失败")
+    badge = normalize_config(
+        {
+            "badge_renewal_enabled": True,
+            "badge_live_urls": ["https://live.douyin.com/114687942812"],
+            "badge_check_interval_minutes": 0,
+            "badge_watch_minutes": 999,
+        }
+    )
+    _check(badge["badge_renewal_enabled"] is True, "续灯牌开关配置失败")
+    _check(badge["badge_check_interval_minutes"] == 1, "续灯牌检测间隔下限失败")
+    _check(badge["badge_watch_minutes"] == 180, "续灯牌挂机时长上限失败")
+    _check(
+        normalize_live_url("114687942812") == "https://live.douyin.com/114687942812",
+        "直播间地址规范化失败",
+    )
 
 
 def _check_matching() -> None:
@@ -83,6 +105,39 @@ def _check_store() -> None:
             "待发送好友筛选失败",
         )
         _check(store.history(5)[0]["date"] == "2026-10-06", "历史记录读取失败")
+
+
+def _check_badge_renewal() -> None:
+    with tempfile.TemporaryDirectory() as folder:
+        store = BadgeRenewalStore(Path(folder) / "badge_history.json")
+        live_url = "https://live.douyin.com/114687942812"
+        now = datetime(2026, 10, 7, 20, 0, tzinfo=BEIJING)
+        day = now.strftime("%Y-%m-%d")
+        _check(store.should_check(live_url, 10, now=now)[0] is True, "首次续灯牌检测应可执行")
+        store.record(live_url, "not_live", "未开播", date_key=day, checked_at=now)
+        _check(
+            store.should_check(live_url, 10, now=now)[1] == "未到下次检测时间",
+            "续灯牌检测间隔未生效",
+        )
+        store.record(
+            live_url,
+            "sent",
+            "已续灯牌",
+            watched_seconds=1200,
+            date_key=day,
+            checked_at=now,
+        )
+        _check(
+            store.should_check(live_url, 10, now=now, force=True)[1] == "今天已经续过灯牌",
+            "续灯牌每日幂等未生效",
+        )
+    _check(
+        detect_live_status(
+            {"url": live_url, "title": "主播直播间", "body": "在线观众 123"}
+        )[0]
+        is True,
+        "开播状态识别失败",
+    )
 
 
 def _check_scheduler() -> None:
@@ -177,6 +232,26 @@ editor.addEventListener('keydown', (event) => {
 </body></html>
 """.replace("__FRIEND_ITEMS__", _TEST_FRIEND_ITEMS)
 
+TEST_BADGE_PAGE = """
+<!doctype html>
+<html><head><meta charset="utf-8"><title>自检主播直播间</title></head>
+<body>
+  <div>在线观众 123 本场点赞 456</div>
+  <button id="badge-entry">粉丝团</button>
+  <button id="badge-send" style="display:none">点亮</button>
+  <script>
+    document.getElementById('badge-entry').addEventListener('click', () => {
+      window.__badgeOpened = true;
+      document.getElementById('badge-send').style.display = 'inline-block';
+    });
+    document.getElementById('badge-send').addEventListener('click', () => {
+      window.__badgeSent = true;
+      document.body.setAttribute('data-badge-sent', '1');
+    });
+  </script>
+</body></html>
+"""
+
 TEST_SELECTORS = {
     "chat_urls": ["about:blank"],
     "friends_tab": ["#friends-tab"],
@@ -241,7 +316,7 @@ def _check_embedded_flow() -> None:
 
             async def probes():
                 bridge = application.browser
-                return {
+                result = {
                     "eval": await bridge.evaluate("1 + 1"),
                     "title": await bridge.evaluate("document.title"),
                     "boxes": await bridge.evaluate("document.querySelectorAll('.msg-box').length"),
@@ -258,6 +333,20 @@ def _check_embedded_flow() -> None:
                     ),
                     "fresh": await application.check_friends_fresh(),
                 }
+                badge_data_url = "data:text/html;base64," + base64.b64encode(
+                    TEST_BADGE_PAGE.encode("utf-8")
+                ).decode("ascii")
+                await bridge.goto(badge_data_url)
+                await asyncio.sleep(1.0)
+                result["badge"] = await renew_badge_on_current_page(
+                    bridge,
+                    "https://live.douyin.com/114687942812",
+                    1,
+                    logging.getLogger("自检续灯牌"),
+                    ready_timeout_seconds=10.0,
+                )
+                result["badgeSent"] = await bridge.evaluate("Boolean(window.__badgeSent)")
+                return result
 
             outcome["probes"] = application.submit(probes()).result(timeout=90)
         except Exception as exc:
@@ -299,6 +388,9 @@ def _check_embedded_flow() -> None:
         (probes.get("fresh") or {}).get("fresh") is False,
         "快速校验在没有缓存对应好友时不应判定为通过",
     )
+    badge_result = probes.get("badge") or {}
+    _check(badge_result.get("status") == "sent", f"续灯牌浏览器流程失败：{badge_result}")
+    _check(probes.get("badgeSent") is True, "续灯牌点亮按钮没有触发")
 
 
 def run_selftest(include_browser: bool = False) -> int:
@@ -313,6 +405,8 @@ def run_selftest(include_browser: bool = False) -> int:
     print("消息发送方式：通过")
     _check_store()
     print("发送记录幂等：通过")
+    _check_badge_renewal()
+    print("续灯牌记录与识别：通过")
     _check_scheduler()
     print("定时触发逻辑：通过")
 

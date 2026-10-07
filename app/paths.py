@@ -10,6 +10,7 @@ LOG_DIR = PROJECT_ROOT / "logs"
 
 CONFIG_PATH = DATA_DIR / "config.json"
 HISTORY_PATH = DATA_DIR / "send_history.json"
+BADGE_HISTORY_PATH = DATA_DIR / "badge_renewal_history.json"
 SELECTORS_PATH = DATA_DIR / "selectors.json"
 RUNTIME_PATH = DATA_DIR / "runtime.json"
 AVATAR_DIR = DATA_DIR / "avatars"
