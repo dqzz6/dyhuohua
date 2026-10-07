@@ -1,7 +1,12 @@
 .venv/
+build/
+dist/
 __pycache__/
 *.pyc
 .pytest_cache/
+*.exe
+*.log
+.env
 
 data/*
 !data/.gitkeep

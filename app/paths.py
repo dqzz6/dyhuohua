@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import zlib
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if getattr(sys, "frozen", False):
+    PROJECT_ROOT = Path(sys.executable).resolve().parent
+else:
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
 INSTANCE_ENV = "DOUYIN_INSTANCE"
 DEFAULT_INSTANCE_NAME = "默认"
 DEFAULT_CONTROL_API_PORT = 8791
