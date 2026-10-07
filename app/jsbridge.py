@@ -31,6 +31,7 @@ const hasBox = (node) => {
   const rect = node.getBoundingClientRect();
   return rect.width > 0 && rect.height > 0;
 };
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // 页面有时会把同一份列表渲染两遍（隐藏一份、可见一份）。
 // 优先取可见的那份，实在取不到再退回原逻辑，避免点中 0 尺寸的隐藏节点。
 const pickVisibleNodes = (selectorList) => {
@@ -107,3 +108,9 @@ def build_script(body: str, args: Dict[str, Any]) -> str:
     """把 JS 片段与参数拼成一段可直接执行的 IIFE。"""
     payload = json.dumps(args, ensure_ascii=False)
     return "(() => {\nconst A = " + payload + ";\n" + JS_PRELUDE + "\n" + body + "\n})()"
+
+
+def build_async_script(body: str, args: Dict[str, Any]) -> str:
+    """同 build_script，但生成 async IIFE，脚本内部可以等待页面渲染完成。"""
+    payload = json.dumps(args, ensure_ascii=False)
+    return "(async () => {\nconst A = " + payload + ";\n" + JS_PRELUDE + "\n" + body + "\n})()"

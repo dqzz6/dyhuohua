@@ -7,7 +7,7 @@ import unicodedata
 from typing import Any, Dict, List, Tuple
 
 from .cdp import CdpError
-from .jsbridge import RESET_SCROLL_BODY, SCROLL_DOWN_BODY, build_script
+from .jsbridge import RESET_SCROLL_BODY, SCROLL_DOWN_BODY, build_async_script, build_script
 
 
 class SendError(RuntimeError):
@@ -49,6 +49,10 @@ def name_matches(candidate: str, target: str, mode: str = "equals") -> bool:
 
 def _script(body: str, args: Dict[str, Any]) -> str:
     return build_script(body, args)
+
+
+def _async_script(body: str, args: Dict[str, Any]) -> str:
+    return build_async_script(body, args)
 
 
 PROBE_BODY = r"""
@@ -237,30 +241,63 @@ const nameOf = (node) => {
   const own = (node.innerText || '').trim();
   return own ? own.split('\n')[0] : '';
 };
-const nodes = pickVisibleNodes(A.itemSelectors);
-const wanted = normalizeName(A.target);
-const names = [];
-let hit = null;
-for (const node of nodes) {
-  const name = normalizeName(nameOf(node));
-  if (!name) continue;
-  if (names.indexOf(name) < 0) names.push(name);
-  if (hit) continue;
-  const matched = A.mode === 'contains'
-    ? (name.indexOf(wanted) >= 0 || wanted.indexOf(name) >= 0)
-    : name === wanted;
-  if (matched) hit = node;
-}
-let point = null;
-if (hit) {
-  hit.setAttribute('data-dymsg-friend', '1');
-  hit.scrollIntoView({ block: 'center' });
-  const rect = hit.getBoundingClientRect();
-  if (rect.width > 0 && rect.height > 0) {
-    point = { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
+const scan = () => {
+  const nodes = pickVisibleNodes(A.itemSelectors);
+  const wanted = normalizeName(A.target);
+  const names = [];
+  let hit = null;
+  for (const node of nodes) {
+    const name = normalizeName(nameOf(node));
+    if (!name) continue;
+    if (names.indexOf(name) < 0) names.push(name);
+    if (hit) continue;
+    const matched = A.mode === 'contains'
+      ? (name.indexOf(wanted) >= 0 || wanted.indexOf(name) >= 0)
+      : name === wanted;
+    if (matched) hit = node;
   }
+  return { hit: hit, names: names, total: nodes.length };
+};
+const first = scan();
+if (!first.hit) {
+  return { matched: false, names: first.names.slice(0, 40), total: first.total, point: null };
 }
-return { matched: Boolean(hit), names: names.slice(0, 40), total: nodes.length, point };
+// 好友列表是虚拟列表：滚动之后它会异步重排，同一个 DOM 节点可能被复用成别人，
+// 所以必须重新定位目标、等位置稳定，并用 elementFromPoint 确认坐标确实落在这一行上。
+let point = null;
+let stableKey = '';
+for (let attempt = 0; attempt < 10; attempt += 1) {
+  const current = scan().hit;
+  if (!current) {
+    await sleep(90);
+    continue;
+  }
+  current.scrollIntoView({ block: 'center' });
+  await sleep(90);
+  const fresh = scan().hit;
+  if (!fresh) {
+    await sleep(90);
+    continue;
+  }
+  const rect = fresh.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) {
+    await sleep(90);
+    continue;
+  }
+  const x = Math.round(rect.x + rect.width / 2);
+  const y = Math.round(rect.y + rect.height / 2);
+  const at = document.elementFromPoint(x, y);
+  const key = x + ':' + y;
+  if (at && fresh.contains(at) && key === stableKey) {
+    fresh.setAttribute('data-dymsg-friend', '1');
+    point = { x: x, y: y };
+    break;
+  }
+  stableKey = key;
+}
+const finalHit = scan().hit;
+if (finalHit) finalHit.setAttribute('data-dymsg-friend', '1');
+return { matched: true, names: first.names.slice(0, 40), total: first.total, point: point };
 """
 
 JS_FRIEND_CLICK_BODY = r"""
@@ -300,7 +337,7 @@ async def find_friend(
         logger.warning("没有找到好友列表的滚动容器，只能在当前可见范围内查找")
 
     for round_index in range(max_scrolls):
-        result = await bridge.evaluate(_script(FRIEND_SCAN_BODY, args))
+        result = await bridge.evaluate(_async_script(FRIEND_SCAN_BODY, args))
         if not isinstance(result, dict):
             result = {}
         for name in result.get("names") or []:
@@ -323,6 +360,84 @@ async def find_friend(
 
     preview = "、".join(seen_names[:30]) if seen_names else "无"
     raise TargetNotFoundError(f"未在好友列表中找到「{target_name}」。已看到：{preview}")
+
+
+CHAT_HEADER_BODY = r"""
+for (const selector of A.selectors) {
+  for (const node of queryAll(selector)) {
+    if (!hasBox(node)) continue;
+    const text = (node.innerText || node.textContent || '').trim();
+    if (text) return { found: true, name: text.split('\n')[0].trim() };
+  }
+}
+return { found: false, name: '' };
+"""
+
+
+async def read_open_chat_name(bridge, selectors: Dict[str, List[str]]) -> str:
+    """读取右侧会话面板顶部的对方昵称，用于确认当前打开的会话是谁。"""
+    try:
+        info = await bridge.evaluate(
+            _script(CHAT_HEADER_BODY, {"selectors": selectors.get("chat_header_name", [])})
+        )
+    except CdpError:
+        return ""
+    if isinstance(info, dict) and info.get("found"):
+        return str(info.get("name") or "")
+    return ""
+
+
+async def confirm_chat_target(
+    bridge,
+    target_name: str,
+    selectors: Dict[str, List[str]],
+    match_mode: str = "equals",
+    timeout_seconds: float = 5.0,
+) -> str:
+    """确认右侧会话已经切到目标好友，返回 matched / mismatch / unknown。"""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.5, float(timeout_seconds))
+    seen = ""
+    while loop.time() < deadline:
+        name = await read_open_chat_name(bridge, selectors)
+        if name:
+            seen = name
+            if name_matches(name, target_name, match_mode):
+                return "matched"
+        await asyncio.sleep(0.4)
+    return "mismatch" if seen else "unknown"
+
+
+async def open_target_chat(
+    bridge,
+    target_name: str,
+    selectors: Dict[str, List[str]],
+    logger,
+    match_mode: str = "equals",
+    attempts: int = 2,
+) -> bool:
+    """点击目标好友并确认会话真的切过去了，避免把消息发进上一个好友的会话。"""
+    for attempt in range(1, max(1, int(attempts)) + 1):
+        found = await find_friend(bridge, target_name, selectors, logger, match_mode=match_mode)
+        point = found.get("point") or {}
+        if point.get("x") is not None:
+            await _click_point(bridge, point)
+        else:
+            clicked = await bridge.evaluate(_script(JS_FRIEND_CLICK_BODY, {}))
+            if not isinstance(clicked, dict) or not clicked.get("clicked"):
+                raise TargetNotFoundError(f"找到了「{target_name}」但无法点击，请重试")
+            logger.warning("好友元素坐标不可用，已改用脚本点击")
+
+        status = await confirm_chat_target(bridge, target_name, selectors, match_mode)
+        if status == "matched":
+            return True
+        if status == "unknown":
+            logger.warning("读不到当前会话名称，跳过切换校验")
+            return True
+        if attempt < attempts:
+            logger.warning(f"点击后会话没有切到「{target_name}」，正在重试")
+            await asyncio.sleep(1.0)
+    return False
 
 
 FOCUS_INPUT_BODY = r"""
@@ -407,6 +522,8 @@ let matches = 0;
 for (const selector of A.selectors) {
   for (const node of queryAll(selector)) {
     if (node.closest('[contenteditable="true"]')) continue;
+    // 时间戳节点（凌晨 01:19、12:14）里也带数字，会把短消息误判成已发送。
+    if ((node.className || '').toString().indexOf('time-') >= 0) continue;
     const text = normalize(node.innerText || node.textContent || '');
     if (text && text.indexOf(wanted) >= 0) matches += 1;
   }
@@ -428,22 +545,88 @@ async def count_own_messages(bridge, message: str, selectors: Dict[str, List[str
         return 0
 
 
+FRIEND_PREVIEW_BODY = r"""
+const wanted = normalizeName(A.target);
+for (const node of pickVisibleNodes(A.itemSelectors)) {
+  let nameNode = null;
+  for (const selector of A.nameSelectors) {
+    const found = node.querySelector(selector);
+    if (found && (found.innerText || '').trim()) { nameNode = found; break; }
+  }
+  if (!nameNode) continue;
+  const name = normalizeName((nameNode.innerText || '').split('\n')[0]);
+  const matched = A.mode === 'contains'
+    ? (name.indexOf(wanted) >= 0 || wanted.indexOf(name) >= 0)
+    : name === wanted;
+  if (!matched) continue;
+  for (const selector of A.previewSelectors) {
+    const previewNode = node.querySelector(selector);
+    const text = previewNode ? (previewNode.innerText || previewNode.textContent || '').trim() : '';
+    if (text) return { found: true, preview: text.split('\n')[0] };
+  }
+}
+return { found: false, preview: '' };
+"""
+
+
+async def read_friend_preview(
+    bridge,
+    target_name: str,
+    selectors: Dict[str, List[str]],
+    match_mode: str = "equals",
+) -> str:
+    """读取好友列表里某位好友的最新一条消息预览。"""
+    try:
+        info = await bridge.evaluate(
+            _script(
+                FRIEND_PREVIEW_BODY,
+                {
+                    "itemSelectors": selectors.get("friend_item", []),
+                    "nameSelectors": selectors.get("friend_name", []),
+                    "previewSelectors": selectors.get("friend_preview", []),
+                    "target": target_name,
+                    "mode": match_mode,
+                },
+            )
+        )
+    except CdpError:
+        return ""
+    if isinstance(info, dict) and info.get("found"):
+        return str(info.get("preview") or "")
+    return ""
+
+
 async def confirm_sent(
     bridge,
     message: str,
     selectors: Dict[str, List[str]],
+    target_name: str = "",
+    match_mode: str = "equals",
     timeout_seconds: int = 30,
+    baseline: int = 0,
 ) -> Tuple[bool, str]:
-    """发送后校验：输入框已清空，且会话里出现了这条消息。"""
+    """发送后校验：输入框已清空，且会话新增了这条消息（或好友列表预览已更新）。"""
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout_seconds
+    deadline = loop.time() + int(timeout_seconds)
     detail = "等待发送结果超时"
+    probe = normalize_text(message)[:50]
+    floor = max(0, int(baseline or 0))
     while loop.time() < deadline:
         remaining = normalize_text(await read_input_text(bridge))
-        matched = await count_own_messages(bridge, message, selectors)
-        if matched > 0 and not remaining:
-            return True, f"输入框已清空，会话中已出现该消息（匹配 {matched} 处）"
-        detail = f"输入框仍有内容：{remaining[:40]}" if remaining else "输入框已清空，但会话中暂未检测到该消息"
+        if not remaining:
+            matched = await count_own_messages(bridge, message, selectors)
+            if matched > floor:
+                return True, f"输入框已清空，会话中已出现该消息（匹配 {matched} 处）"
+            if target_name and probe:
+                preview = normalize_text(
+                    await read_friend_preview(bridge, target_name, selectors, match_mode)
+                )
+                # 预览会被截断，所以长消息只比对开头，短消息按包含比对。
+                if preview and (probe in preview or preview[:12] == probe[:12]):
+                    return True, "输入框已清空，好友列表已显示这条消息"
+            detail = "输入框已清空，但会话与好友列表里都还没出现这条消息"
+        else:
+            detail = f"输入框仍有内容：{remaining[:40]}"
         await asyncio.sleep(1.0)
     return False, detail
 
@@ -467,17 +650,8 @@ async def send_message(
     await wait_for_chat_ready(bridge)
     await click_friends_tab(bridge, selectors, logger)
 
-    found = await find_friend(bridge, target_name, selectors, logger, match_mode=match_mode)
-    point = found.get("point") or {}
-    if point.get("x") is not None:
-        await _click_point(bridge, point)
-    else:
-        # 窗口被最小化或不可见时拿不到坐标，改用脚本点击兜底。
-        clicked = await bridge.evaluate(_script(JS_FRIEND_CLICK_BODY, {}))
-        if not isinstance(clicked, dict) or not clicked.get("clicked"):
-            raise TargetNotFoundError(f"找到了「{target_name}」但无法点击，请重试")
-        logger.warning("好友元素坐标不可用，已改用脚本点击")
-    await asyncio.sleep(1.5)
+    if not await open_target_chat(bridge, target_name, selectors, logger, match_mode):
+        raise SendError(f"没能切换到「{target_name}」的会话，为避免消息发错人已取消本次发送")
 
     await locate_chat_input(bridge, selectors)
     await clear_input(bridge)
@@ -490,11 +664,15 @@ async def send_message(
             await bridge.press_key("Enter", modifiers=SHIFT_MODIFIER)
     await asyncio.sleep(0.4)
 
+    # 发送前先记录命中数，发送后只认“新增”，避免短消息（如「1」）被旧消息或时间戳误判。
+    baseline = await count_own_messages(bridge, message, selectors)
     logger.info(f"准备发送消息给「{target_name}」，长度 {len(message)} 字")
     await bridge.press_key("Enter")
 
     send_timeout = max(10, min(60, int(timeout_seconds)))
-    ok, detail = await confirm_sent(bridge, message, selectors, send_timeout)
+    ok, detail = await confirm_sent(
+        bridge, message, selectors, target_name, match_mode, send_timeout, baseline
+    )
     if not ok:
         raise SendError(f"发送结果未确认：{detail}")
 

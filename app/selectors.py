@@ -31,6 +31,13 @@ DEFAULT_SELECTORS: Dict[str, List[str]] = {
         'xpath=//*[@id="sub-app"]//div[contains(@class,"ReactVirtualized__Grid")]',
         'xpath=//*[@id="sub-app"]//ul',
     ],
+    "friend_preview": [
+        '[class*="item-content-"]',
+        '[class*="item-text-"]',
+    ],
+    "chat_header_name": [
+        '[class*="box-header-name"]',
+    ],
     "chat_input": [
         "xpath=//div[contains(@class,'chat-input-') and @contenteditable='true']",
         "xpath=//div[contains(@class, 'chat-input-')]//div[@contenteditable='true']",
