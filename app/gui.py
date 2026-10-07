@@ -926,7 +926,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "请先填写至少一个直播间地址")
             return
         self.browser_tabs.setCurrentIndex(1)
-        self._set_busy(True)
+        self._set_badge_actions_busy(True)
 
         def worker() -> None:
             try:
@@ -963,7 +963,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "请先填写至少一个直播间地址")
             return
         self.browser_tabs.setCurrentIndex(1)
-        self._set_busy(True)
+        self._set_badge_actions_busy(True)
 
         def worker() -> None:
             try:
@@ -989,7 +989,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "发送失败", detail)
 
     def _on_badge_finished(self, result: dict) -> None:
-        self._set_busy(False)
+        self._set_badge_actions_busy(False)
         detail = str(result.get("detail") or "未知原因")
         if result.get("ok"):
             QMessageBox.information(self, "续灯牌检测完成", detail)
@@ -997,7 +997,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "续灯牌检测失败", detail)
 
     def _on_badge_test_finished(self, result: dict) -> None:
-        self._set_busy(False)
+        self._set_badge_actions_busy(False)
         detail = str(result.get("detail") or "未知原因")
         if result.get("ok"):
             QMessageBox.information(self, "灯牌测试完成", detail)
@@ -1017,10 +1017,12 @@ class MainWindow(QMainWindow):
             self.button_reload,
             self.button_send,
             self.button_scan,
-            self.button_badge_test,
-            self.button_badge_send_test,
         ):
             button.setEnabled(not busy)
+
+    def _set_badge_actions_busy(self, busy: bool) -> None:
+        self.button_badge_test.setEnabled(not busy)
+        self.button_badge_send_test.setEnabled(not busy)
 
     # ---------- 状态与日志刷新 ----------
     def _start_polling(self) -> None:
