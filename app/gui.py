@@ -26,6 +26,8 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QSpinBox,
     QSplitter,
+    QStyle,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -40,6 +42,166 @@ from .service import Application
 
 AVATAR_SIZE = QSize(34, 34)
 SELECTED_AVATAR_SIZE = QSize(26, 26)
+
+APP_STYLE = """
+QMainWindow, QWidget#controlPanel {
+    background: #eef3f8;
+    color: #1b2a41;
+}
+QSplitter::handle {
+    background: #d6e0eb;
+    width: 1px;
+}
+QGroupBox {
+    background: #ffffff;
+    border: 1px solid #dbe5ef;
+    border-radius: 8px;
+    margin-top: 10px;
+    padding: 14px 10px 10px 10px;
+    color: #17253a;
+    font-weight: 600;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 12px;
+    padding: 0 6px;
+    color: #17253a;
+}
+QGroupBox#badgeCard {
+    background: #fbfefd;
+    border: 1px solid #b8ddd8;
+}
+QLabel {
+    color: #53657c;
+}
+QLabel#badgeCount {
+    color: #0f766e;
+    font-weight: 600;
+}
+QLineEdit, QPlainTextEdit, QSpinBox {
+    background: #fbfdff;
+    border: 1px solid #cbd8e5;
+    border-radius: 6px;
+    padding: 6px 8px;
+    color: #16243a;
+    selection-background-color: #159a91;
+}
+QLineEdit:focus, QPlainTextEdit:focus, QSpinBox:focus {
+    border: 1px solid #159a91;
+    background: #ffffff;
+}
+QPushButton {
+    background: #f7fafc;
+    border: 1px solid #cbd8e5;
+    border-radius: 6px;
+    color: #24364e;
+    font-weight: 600;
+    padding: 7px 11px;
+}
+QPushButton:hover {
+    background: #eaf4fb;
+    border-color: #8db8df;
+}
+QPushButton:pressed {
+    background: #dceaf8;
+}
+QPushButton:disabled {
+    background: #eef2f6;
+    color: #98a6b7;
+    border-color: #dce4ec;
+}
+QPushButton#primaryButton {
+    background: #176fa8;
+    border-color: #176fa8;
+    color: #ffffff;
+}
+QPushButton#primaryButton:hover {
+    background: #125d90;
+}
+QPushButton#successButton {
+    background: #0f8f82;
+    border-color: #0f8f82;
+    color: #ffffff;
+}
+QPushButton#successButton:hover {
+    background: #0b756b;
+}
+QPushButton#accentButton {
+    background: #edf8f6;
+    border-color: #7fc8c0;
+    color: #0f6b63;
+}
+QPushButton#accentButton:hover {
+    background: #d9f1ed;
+}
+QCheckBox, QRadioButton {
+    color: #34465d;
+    spacing: 6px;
+}
+QListWidget {
+    background: #ffffff;
+    border: 1px solid #dbe5ef;
+    border-radius: 6px;
+    outline: 0;
+}
+QListWidget::item {
+    border-radius: 4px;
+    padding: 6px;
+}
+QListWidget::item:hover {
+    background: #f1f7fb;
+}
+QListWidget::item:selected {
+    background: #d9f1ed;
+    color: #0f655f;
+}
+QPlainTextEdit#logView {
+    background: #0f172a;
+    border: 1px solid #1f314b;
+    color: #d8eee9;
+    selection-background-color: #1e5b68;
+}
+QScrollBar:vertical {
+    background: #eef3f8;
+    width: 10px;
+    margin: 2px;
+}
+QScrollBar::handle:vertical {
+    background: #b8c8d9;
+    border-radius: 5px;
+    min-height: 30px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #8fa9c1;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0;
+}
+QTabWidget::pane {
+    background: #eef3f8;
+    border: 0;
+    top: -1px;
+}
+QTabBar::tab {
+    background: #dde7f0;
+    border: 1px solid #cbd8e5;
+    border-bottom: 0;
+    border-top-left-radius: 7px;
+    border-top-right-radius: 7px;
+    color: #52657b;
+    margin-right: 3px;
+    min-width: 112px;
+    padding: 8px 16px;
+}
+QTabBar::tab:selected {
+    background: #ffffff;
+    color: #135f93;
+    font-weight: 600;
+}
+QTabBar::tab:hover:!selected {
+    background: #eaf2f8;
+}
+"""
 
 
 def filter_friend_names(friends, keyword: str) -> list:
@@ -88,6 +250,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("抖音自动消息")
         self.resize(1480, 980)
         self.setMinimumSize(1150, 820)
+        self.setStyleSheet(APP_STYLE)
 
         self._build_widgets()
         self._load_form()
@@ -98,6 +261,7 @@ class MainWindow(QMainWindow):
     # ---------- 界面搭建 ----------
     def _build_widgets(self) -> None:
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setObjectName("mainSplitter")
         splitter.addWidget(self.browser)
         splitter.addWidget(self._build_panel())
         splitter.setStretchFactor(0, 6)
@@ -105,17 +269,45 @@ class MainWindow(QMainWindow):
         splitter.setSizes([820, 620])
         self.setCentralWidget(splitter)
 
+    def _set_button_icon(
+        self,
+        button: QPushButton,
+        pixmap: QStyle.StandardPixmap,
+    ) -> None:
+        icon = self.style().standardIcon(pixmap)
+        if not icon.isNull():
+            button.setIcon(icon)
+            button.setIconSize(QSize(16, 16))
+
     def _build_panel(self) -> QWidget:
         panel = QWidget()
+        panel.setObjectName("controlPanel")
         panel.setMinimumWidth(470)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
         layout.addWidget(self._build_status_group())
-        layout.addWidget(self._build_settings_group())
-        layout.addWidget(self._build_badge_group())
-        layout.addWidget(self._build_friends_group(), 5)
+
+        tabs = QTabWidget()
+        tabs.setObjectName("mainTabs")
+        message_tab = QWidget()
+        message_layout = QVBoxLayout(message_tab)
+        message_layout.setContentsMargins(0, 6, 0, 0)
+        message_layout.setSpacing(10)
+        message_layout.addWidget(self._build_settings_group())
+        message_layout.addWidget(self._build_friends_group(), 1)
+        tabs.addTab(message_tab, "自动消息")
+
+        badge_tab = QWidget()
+        badge_layout = QVBoxLayout(badge_tab)
+        badge_layout.setContentsMargins(0, 6, 0, 0)
+        badge_layout.setSpacing(10)
+        badge_layout.addWidget(self._build_badge_group())
+        badge_layout.addStretch(1)
+        tabs.addTab(badge_tab, "自动续灯牌")
+
+        layout.addWidget(tabs, 5)
         layout.addLayout(self._build_buttons())
         layout.addWidget(self._build_log_group(), 2)
         return panel
@@ -196,15 +388,23 @@ class MainWindow(QMainWindow):
 
     def _build_badge_group(self) -> QGroupBox:
         group = QGroupBox("自动续粉丝灯牌")
+        group.setObjectName("badgeCard")
         grid = QGridLayout(group)
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(6)
 
         self.check_badge_enabled = QCheckBox("开启定时监控直播间")
+        self.label_badge_count = QLabel("未配置直播间")
+        self.label_badge_count.setObjectName("badgeCount")
+        self.label_badge_count.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         self.input_badge_urls = QPlainTextEdit()
-        self.input_badge_urls.setFixedHeight(54)
+        self.input_badge_urls.setObjectName("urlEditor")
+        self.input_badge_urls.setFixedHeight(66)
         self.input_badge_urls.setPlaceholderText(
-            "每行一个直播间地址，例如：\nhttps://live.douyin.com/114687942812"
+            "每行填写一个直播间地址，可添加多个\n"
+            "支持直接粘贴抖音分享文案中的 live.douyin.com 链接"
         )
         self.spin_badge_interval = QSpinBox()
         self.spin_badge_interval.setRange(1, 1440)
@@ -215,11 +415,19 @@ class MainWindow(QMainWindow):
         self.spin_badge_watch.setSuffix(" 分钟")
         self.spin_badge_watch.setFixedWidth(112)
         self.button_badge_test = QPushButton("立即检测一次")
-        self.label_badge_hint = QLabel("默认每 10 分钟检测一次；确认开播后自动续灯牌，并挂满 20 分钟。")
+        self.button_badge_test.setObjectName("accentButton")
+        self._set_button_icon(
+            self.button_badge_test,
+            QStyle.StandardPixmap.SP_MediaPlay,
+        )
+        self.label_badge_hint = QLabel(
+            "默认每 10 分钟检测一次；确认开播后自动续灯牌，并挂满 20 分钟。"
+        )
         self.label_badge_hint.setWordWrap(True)
 
-        grid.addWidget(self.check_badge_enabled, 0, 0, 1, 4)
-        grid.addWidget(QLabel("主播直播间"), 1, 0, Qt.AlignmentFlag.AlignTop)
+        grid.addWidget(self.check_badge_enabled, 0, 0, 1, 3)
+        grid.addWidget(self.label_badge_count, 0, 3)
+        grid.addWidget(QLabel("自定义监控列表"), 1, 0, Qt.AlignmentFlag.AlignTop)
         grid.addWidget(self.input_badge_urls, 1, 1, 1, 3)
         grid.addWidget(QLabel("检测间隔"), 2, 0)
         grid.addWidget(self.spin_badge_interval, 2, 1)
@@ -241,6 +449,7 @@ class MainWindow(QMainWindow):
         self.input_search.setClearButtonEnabled(True)
         self.button_scan = QPushButton("读取好友列表")
         self.button_scan.setFixedWidth(120)
+        self._set_button_icon(self.button_scan, QStyle.StandardPixmap.SP_BrowserReload)
         search_row.addWidget(self.input_search, 1)
         search_row.addWidget(self.button_scan)
         layout.addLayout(search_row)
@@ -250,12 +459,19 @@ class MainWindow(QMainWindow):
         self.list_selected = QListWidget()
         self.list_selected.setIconSize(SELECTED_AVATAR_SIZE)
         self.list_selected.setFixedHeight(84)
-        self.list_selected.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.list_selected.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
         layout.addWidget(self.list_selected)
 
         action_row = QHBoxLayout()
         self.button_all = QPushButton("全选当前结果")
         self.button_none = QPushButton("清空选择")
+        self._set_button_icon(self.button_all, QStyle.StandardPixmap.SP_DialogOkButton)
+        self._set_button_icon(
+            self.button_none,
+            QStyle.StandardPixmap.SP_DialogCancelButton,
+        )
         self.label_friends = QLabel("还没有读取好友列表，登录后会自动读取一次。")
         self.label_friends.setWordWrap(True)
         action_row.addWidget(self.button_all)
@@ -277,7 +493,24 @@ class MainWindow(QMainWindow):
         self.button_reload = QPushButton("打开私信页")
         self.button_send = QPushButton("立即给选中好友发送")
         self.button_data = QPushButton("打开数据目录")
-        for button in (self.button_save, self.button_reload, self.button_send, self.button_data):
+        self.button_save.setObjectName("primaryButton")
+        self.button_send.setObjectName("successButton")
+        self._set_button_icon(
+            self.button_save,
+            QStyle.StandardPixmap.SP_DialogSaveButton,
+        )
+        self._set_button_icon(
+            self.button_reload,
+            QStyle.StandardPixmap.SP_BrowserReload,
+        )
+        self._set_button_icon(self.button_send, QStyle.StandardPixmap.SP_ArrowRight)
+        self._set_button_icon(self.button_data, QStyle.StandardPixmap.SP_DirOpenIcon)
+        for button in (
+            self.button_save,
+            self.button_reload,
+            self.button_send,
+            self.button_data,
+        ):
             row.addWidget(button)
         return row
 
@@ -285,6 +518,7 @@ class MainWindow(QMainWindow):
         group = QGroupBox("运行日志")
         layout = QVBoxLayout(group)
         self.text_log = QPlainTextEdit()
+        self.text_log.setObjectName("logView")
         self.text_log.setReadOnly(True)
         self.text_log.setFont(QFont("Consolas", 9))
         layout.addWidget(self.text_log)
@@ -304,6 +538,7 @@ class MainWindow(QMainWindow):
         self.list_selected.itemDoubleClicked.connect(self._remove_selected_item)
         self.radio_random.toggled.connect(self._update_message_hint)
         self.input_message.textChanged.connect(self._update_message_hint)
+        self.input_badge_urls.textChanged.connect(self._update_badge_hint)
         self.check_badge_enabled.toggled.connect(self._update_badge_hint)
         self.spin_badge_interval.valueChanged.connect(self._update_badge_hint)
         self.spin_badge_watch.valueChanged.connect(self._update_badge_hint)
@@ -327,11 +562,15 @@ class MainWindow(QMainWindow):
         self.input_badge_urls.setPlainText(
             "\n".join(str(url) for url in (config.get("badge_live_urls") or []))
         )
-        self.spin_badge_interval.setValue(int(config.get("badge_check_interval_minutes") or 10))
+        self.spin_badge_interval.setValue(
+            int(config.get("badge_check_interval_minutes") or 10)
+        )
         self.spin_badge_watch.setValue(int(config.get("badge_watch_minutes") or 20))
         self._update_message_hint()
         self._update_badge_hint()
-        self._selected_names = {str(name) for name in (config.get("target_names") or [])}
+        self._selected_names = {
+            str(name) for name in (config.get("target_names") or [])
+        }
 
     def _update_message_hint(self) -> None:
         text = self.input_message.toPlainText()
@@ -345,14 +584,27 @@ class MainWindow(QMainWindow):
             self.label_message_hint.setText(f"当前 {lines} 行，会作为一条消息整体发出")
 
     def _update_badge_hint(self) -> None:
+        try:
+            live_urls = normalize_live_urls(self.input_badge_urls.toPlainText())
+        except ValueError as exc:
+            self.label_badge_count.setText("地址格式有误")
+            self.label_badge_hint.setText(f"请检查直播间地址：{exc}")
+            return
+        count = len(live_urls)
+        self.label_badge_count.setText(
+            f"已配置 {count} 个直播间" if count else "未配置直播间"
+        )
         if self.check_badge_enabled.isChecked():
-            self.label_badge_hint.setText(
-                f"已开启：每 {self.spin_badge_interval.value()} 分钟检测一次，"
-                f"开播后续灯牌并挂满 {self.spin_badge_watch.value()} 分钟。"
-            )
+            if count:
+                self.label_badge_hint.setText(
+                    f"已开启：每 {self.spin_badge_interval.value()} 分钟检测一次，"
+                    f"开播后续灯牌并挂满 {self.spin_badge_watch.value()} 分钟。"
+                )
+            else:
+                self.label_badge_hint.setText("已开启，但还没有配置直播间地址，请每行填写一个地址。")
         else:
             self.label_badge_hint.setText(
-                "默认每 10 分钟检测一次；开启后，确认开播会自动续灯牌并挂满设定时长。"
+                "每行一个地址，可添加多个主播；开启后确认开播会自动续灯牌并挂满设定时长。"
             )
 
     def _load_cached_friends(self) -> None:
@@ -391,7 +643,9 @@ class MainWindow(QMainWindow):
                     | Qt.ItemFlag.ItemIsSelectable
                 )
                 node.setCheckState(
-                    Qt.CheckState.Checked if name in self._selected_names else Qt.CheckState.Unchecked
+                    Qt.CheckState.Checked
+                    if name in self._selected_names
+                    else Qt.CheckState.Unchecked
                 )
                 icon = self._icon_for(name)
                 if not icon.isNull():
@@ -425,9 +679,14 @@ class MainWindow(QMainWindow):
             return
         keyword = self.input_search.text().strip()
         if keyword:
-            self.label_friends.setText(f"搜索到 {visible} 位（共 {total} 位），已勾选 {len(self._selected_names)} 位。")
+            self.label_friends.setText(
+                f"搜索到 {visible} 位（共 {total} 位），"
+                f"已勾选 {len(self._selected_names)} 位。"
+            )
         else:
-            self.label_friends.setText(f"共 {total} 位好友，已勾选 {len(self._selected_names)} 位。")
+            self.label_friends.setText(
+                f"共 {total} 位好友，已勾选 {len(self._selected_names)} 位。"
+            )
 
     # ---------- 选择交互 ----------
     def _on_friend_item_changed(self, item: QListWidgetItem) -> None:
@@ -493,12 +752,14 @@ class MainWindow(QMainWindow):
         try:
             badge_urls = normalize_live_urls(self.input_badge_urls.toPlainText())
             if self.check_badge_enabled.isChecked() and not badge_urls:
-                raise ValueError("开启自动续灯牌前，请至少填写一个 live.douyin.com 直播间地址")
+                raise ValueError("开启自动续灯牌前，请至少填写一个直播间地址")
             self.app.update_config(
                 {
                     "target_names": names,
                     "message": self.input_message.toPlainText().strip(),
-                    "message_mode": "random_line" if self.radio_random.isChecked() else "whole",
+                    "message_mode": (
+                        "random_line" if self.radio_random.isChecked() else "whole"
+                    ),
                     "send_time": self.input_time.text().strip(),
                     "daily_enabled": self.check_daily.isChecked(),
                     "missed_run": self.check_missed.isChecked(),
@@ -531,7 +792,14 @@ class MainWindow(QMainWindow):
         def worker() -> None:
             try:
                 friends = self.app.submit(self.app.scan_friends()).result(timeout=900)
-                self.friends_ready.emit({"ok": True, "friends": friends, "auto": auto, "mode": "full"})
+                self.friends_ready.emit(
+                    {
+                        "ok": True,
+                        "friends": friends,
+                        "auto": auto,
+                        "mode": "full",
+                    }
+                )
             except Exception as exc:
                 self.friends_ready.emit({"ok": False, "detail": str(exc), "auto": auto})
 
@@ -546,7 +814,9 @@ class MainWindow(QMainWindow):
 
         def worker() -> None:
             try:
-                result = self.app.submit(self.app.ensure_friends_ready()).result(timeout=900)
+                result = self.app.submit(
+                    self.app.ensure_friends_ready()
+                ).result(timeout=900)
                 self.friends_ready.emit(
                     {
                         "ok": True,
@@ -590,14 +860,20 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "请先搜索并勾选要发送的好友")
             return
         preview = "、".join(names[:5]) + ("……" if len(names) > 5 else "")
-        confirm = QMessageBox.question(self, "确认", f"确定现在给这 {len(names)} 位好友发送吗？\n{preview}")
+        confirm = QMessageBox.question(
+            self,
+            "确认",
+            f"确定现在给这 {len(names)} 位好友发送吗？\n{preview}",
+        )
         if confirm != QMessageBox.StandardButton.Yes:
             return
         self._set_busy(True)
 
         def worker() -> None:
             try:
-                result = self.app.submit(self.app.run_send_now(targets=names, reason="手动")).result(timeout=1800)
+                result = self.app.submit(
+                    self.app.run_send_now(targets=names, reason="手动")
+                ).result(timeout=1800)
             except Exception as exc:
                 result = {"ok": False, "detail": str(exc)}
             self.send_finished.emit(result)
@@ -626,7 +902,11 @@ class MainWindow(QMainWindow):
                 result = {"ok": False, "detail": str(exc), "results": []}
             self.badge_finished.emit(result)
 
-        threading.Thread(target=worker, name="manual-badge-renewal", daemon=True).start()
+        threading.Thread(
+            target=worker,
+            name="manual-badge-renewal",
+            daemon=True,
+        ).start()
 
     def _on_send_finished(self, result: dict) -> None:
         self._set_busy(False)
@@ -663,7 +943,11 @@ class MainWindow(QMainWindow):
 
     # ---------- 状态与日志刷新 ----------
     def _start_polling(self) -> None:
-        threading.Thread(target=self._status_loop, name="status-poll", daemon=True).start()
+        threading.Thread(
+            target=self._status_loop,
+            name="status-poll",
+            daemon=True,
+        ).start()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._refresh)
         self.timer.start(1500)
@@ -685,18 +969,28 @@ class MainWindow(QMainWindow):
             browser = status.get("browser") or {}
             self.label_browser.setText("运行中" if browser.get("started") else "未启动")
             logged_in = status.get("logged_in")
-            self.label_login.setText("已登录" if logged_in is True else ("未登录" if logged_in is False else "未知"))
+            self.label_login.setText(
+                "已登录"
+                if logged_in is True
+                else ("未登录" if logged_in is False else "未知")
+            )
             today = status.get("today") or {}
             total = int(today.get("total") or 0)
             sent_count = int(today.get("sentCount") or 0)
             self.label_today.setText(f"{sent_count}/{total} 已发送" if total else "未设置好友")
             next_run = str(status.get("next_run_at") or "")
-            self.label_next.setText(next_run[5:16].replace("T", " ") if len(next_run) >= 16 else "-")
+            self.label_next.setText(
+                next_run[5:16].replace("T", " ")
+                if len(next_run) >= 16
+                else "-"
+            )
             self._refresh_badge_status(status.get("badge") or {})
             self._maybe_auto_scan(logged_in)
 
         self.text_log.setPlainText("\n".join(recent_lines(300)))
-        self.text_log.verticalScrollBar().setValue(self.text_log.verticalScrollBar().maximum())
+        self.text_log.verticalScrollBar().setValue(
+            self.text_log.verticalScrollBar().maximum()
+        )
 
     def _refresh_badge_status(self, badge: dict) -> None:
         if not badge.get("enabled"):
@@ -726,7 +1020,12 @@ class MainWindow(QMainWindow):
 
     def _maybe_auto_scan(self, logged_in) -> None:
         """登录成功后自动读取一次好友列表。"""
-        if logged_in is True and self._last_logged_in is not True and not self._auto_scanned and not self._busy:
+        if (
+            logged_in is True
+            and self._last_logged_in is not True
+            and not self._auto_scanned
+            and not self._busy
+        ):
             self._auto_scanned = True
             self.label_friends.setText("检测到已登录，正在校验好友名单……")
             self._ensure_friends()

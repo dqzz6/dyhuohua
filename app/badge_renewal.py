@@ -21,6 +21,7 @@ MAX_WATCH_MINUTES = 180
 
 LIVE_READY_TEXTS = ("在线观众", "本场点赞", "小时榜", "人气榜", "礼物", "送礼")
 LIVE_OFFLINE_TEXTS = ("直播已结束", "暂未开播", "主播暂时离开")
+LIVE_URL_PATTERN = re.compile(r"https?://live\.douyin\.com/[^\s,，;；]+", re.IGNORECASE)
 BADGE_ENTRY_TEXTS = ("粉丝团", "粉丝牌", "灯牌")
 BADGE_SEND_TEXTS = (
     "点亮(1钻)",
@@ -39,6 +40,9 @@ def normalize_live_url(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
         return ""
+    matched_url = LIVE_URL_PATTERN.search(raw)
+    if matched_url:
+        raw = matched_url.group(0).rstrip("。！？!?）)]}>\"'")
     if re.fullmatch(r"\d+", raw):
         raw = f"https://live.douyin.com/{raw}"
     parsed = urlparse(raw)
@@ -57,7 +61,14 @@ def normalize_live_urls(value: Any) -> List[str]:
     if isinstance(value, (list, tuple, set)):
         raw_items = list(value)
     else:
-        raw_items = re.split(r"[\s,，;；]+", str(value or ""))
+        text = str(value or "")
+        raw_items = LIVE_URL_PATTERN.findall(text)
+        for line in text.splitlines():
+            stripped = line.strip()
+            if re.fullmatch(r"\d+", stripped):
+                raw_items.append(stripped)
+        if not raw_items:
+            raw_items = re.split(r"[\n,，;；]+", text)
 
     result: List[str] = []
     for item in raw_items:
@@ -103,7 +114,10 @@ class BadgeRenewalStore:
     def _write(self, data: Dict[str, Any]) -> None:
         ensure_dirs()
         temp_path = self._path.with_suffix(".json.tmp")
-        temp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         temp_path.replace(self._path)
 
     def get(self, live_url: str, date_key: Optional[str] = None) -> Dict[str, Any]:
@@ -142,7 +156,11 @@ class BadgeRenewalStore:
             return False, "今天已经续过灯牌"
         last_checked = _parse_time(entry.get("lastCheckedAt"))
         interval = max(1, int(interval_minutes or DEFAULT_CHECK_INTERVAL_MINUTES))
-        if not force and last_checked and current - last_checked < timedelta(minutes=interval):
+        if (
+            not force
+            and last_checked
+            and current - last_checked < timedelta(minutes=interval)
+        ):
             return False, "未到下次检测时间"
         return True, ""
 
@@ -299,9 +317,12 @@ async def _click_text_candidate(browser, texts: List[str]) -> Dict[str, Any]:
             const target = node.closest("button,[role='button'],a,[tabindex]") || node;
             const box = target.getBoundingClientRect();
             if (box.width <= 0 || box.height <= 0) continue;
-            if (target.disabled || target.getAttribute("aria-disabled") === "true") continue;
+            if (target.disabled
+                || target.getAttribute("aria-disabled") === "true") continue;
             const className = String(target.className || "");
-            const clickable = Boolean(target.matches("button,a,[role='button'],[tabindex]"))
+            const clickable = Boolean(
+                target.matches("button,a,[role='button'],[tabindex]")
+            )
                 || /button|btn|click|operation/i.test(className);
             candidates.push({{
                 text,

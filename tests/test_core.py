@@ -65,6 +65,13 @@ def test_badge_live_url_normalization() -> None:
         "https://live.douyin.com/114687942812",
         "https://live.douyin.com/895627289314",
     ]
+    assert normalize_live_urls(
+        "主播开播了，点击进入 https://live.douyin.com/223344556677 看直播\n"
+        "备用直播间：https://live.douyin.com/998877665544?enter_from=share"
+    ) == [
+        "https://live.douyin.com/223344556677",
+        "https://live.douyin.com/998877665544",
+    ]
     assert normalize_live_url("") == ""
     for bad in ("https://www.douyin.com/user/demo", "live.douyin.com/"):
         try:
