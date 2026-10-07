@@ -16,6 +16,7 @@ from .badge_renewal import (
     BadgeRenewalStore,
     normalize_live_urls,
     renew_badge_in_live_room,
+    test_badge_gift_in_live_room,
 )
 from .browser import BrowserBridge
 from .config import load_config, save_config
@@ -589,6 +590,74 @@ class Application:
                 "detail": "，".join(detail_parts),
                 "results": results,
                 "reason": reason,
+            }
+            self._last_badge_result = payload
+            return payload
+
+    async def test_badge_gift(self, urls: Optional[List[str]] = None) -> Dict[str, Any]:
+        """实际赠送一次灯牌用于测试，不进入挂机且不受当日成功状态限制。"""
+        if self._badge_lock is None:
+            self._badge_lock = asyncio.Lock()
+        if self._browser_lock is None:
+            self._browser_lock = asyncio.Lock()
+
+        async with self._badge_lock:
+            config = self.config_snapshot()
+            raw_urls = list(urls if urls is not None else config.get("badge_live_urls") or [])
+            try:
+                live_urls = normalize_live_urls(raw_urls)
+            except ValueError as exc:
+                return {"ok": False, "detail": str(exc), "results": []}
+            if not live_urls:
+                return {"ok": False, "detail": "没有配置需要测试的直播间地址", "results": []}
+
+            live_url = live_urls[0]
+            self.logger.info(f"开始测试赠送灯牌：{live_url}")
+            async with self._browser_lock:
+                try:
+                    result = await test_badge_gift_in_live_room(
+                        self.browser,
+                        live_url,
+                        self.logger,
+                    )
+                except Exception as exc:
+                    result = {
+                        "status": "failed",
+                        "detail": f"{type(exc).__name__}：{exc}",
+                        "liveTitle": "",
+                        "watchedSeconds": 0,
+                    }
+                    self.logger.exception(f"测试赠送灯牌异常：{live_url}")
+                finally:
+                    try:
+                        await self.browser.goto(self.start_url())
+                    except Exception as exc:
+                        self.logger.warning(f"测试赠送灯牌后恢复私信页失败：{exc}")
+
+            status = str(result.get("status") or "failed")
+            detail = str(result.get("detail") or "")
+            existing_status = str(self.badge_store.get(live_url).get("status") or "")
+            if status == "sent" or existing_status != "sent":
+                self.badge_store.record(
+                    live_url,
+                    status,
+                    detail,
+                    watched_seconds=0,
+                    live_title=str(result.get("liveTitle") or ""),
+                )
+            payload = {
+                "ok": status == "sent",
+                "detail": detail,
+                "status": status,
+                "liveUrl": live_url,
+                "results": [
+                    {
+                        "ok": status == "sent",
+                        "status": status,
+                        "liveUrl": live_url,
+                        "detail": detail,
+                    }
+                ],
             }
             self._last_badge_result = payload
             return payload

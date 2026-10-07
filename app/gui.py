@@ -134,6 +134,14 @@ QPushButton#accentButton {
 QPushButton#accentButton:hover {
     background: #d9f1ed;
 }
+QPushButton#warningButton {
+    background: #fff7ed;
+    border-color: #fdba74;
+    color: #9a3412;
+}
+QPushButton#warningButton:hover {
+    background: #ffedd5;
+}
 QCheckBox, QRadioButton {
     color: #34465d;
     spacing: 6px;
@@ -233,6 +241,7 @@ class MainWindow(QMainWindow):
     send_finished = Signal(dict)
     friends_ready = Signal(dict)
     badge_finished = Signal(dict)
+    badge_test_finished = Signal(dict)
 
     def __init__(self, app: Application, browser: EmbeddedBrowser):
         super().__init__()
@@ -414,14 +423,20 @@ class MainWindow(QMainWindow):
         self.spin_badge_watch.setRange(1, 180)
         self.spin_badge_watch.setSuffix(" 分钟")
         self.spin_badge_watch.setFixedWidth(112)
-        self.button_badge_test = QPushButton("立即检测一次")
+        self.button_badge_test = QPushButton("检测直播间")
         self.button_badge_test.setObjectName("accentButton")
         self._set_button_icon(
             self.button_badge_test,
             QStyle.StandardPixmap.SP_MediaPlay,
         )
+        self.button_badge_send_test = QPushButton("测试送一次灯牌")
+        self.button_badge_send_test.setObjectName("warningButton")
+        self._set_button_icon(
+            self.button_badge_send_test,
+            QStyle.StandardPixmap.SP_DialogApplyButton,
+        )
         self.label_badge_hint = QLabel(
-            "默认每 10 分钟检测一次；确认开播后自动续灯牌，并挂满 20 分钟。"
+            "默认每 10 分钟检测一次；挂机按实际播放时间累计，发现暂停会自动恢复。"
         )
         self.label_badge_hint.setWordWrap(True)
 
@@ -433,7 +448,11 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.spin_badge_interval, 2, 1)
         grid.addWidget(QLabel("开播后挂机"), 2, 2)
         grid.addWidget(self.spin_badge_watch, 2, 3)
-        grid.addWidget(self.button_badge_test, 3, 1, 1, 2)
+        test_row = QHBoxLayout()
+        test_row.addWidget(self.button_badge_test)
+        test_row.addWidget(self.button_badge_send_test)
+        test_row.addStretch(1)
+        grid.addLayout(test_row, 3, 1, 1, 3)
         grid.addWidget(self.label_badge_hint, 4, 0, 1, 4)
         grid.setColumnStretch(1, 1)
         return group
@@ -543,9 +562,11 @@ class MainWindow(QMainWindow):
         self.spin_badge_interval.valueChanged.connect(self._update_badge_hint)
         self.spin_badge_watch.valueChanged.connect(self._update_badge_hint)
         self.button_badge_test.clicked.connect(self._badge_test_clicked)
+        self.button_badge_send_test.clicked.connect(self._badge_send_test_clicked)
         self.send_finished.connect(self._on_send_finished)
         self.friends_ready.connect(self._on_friends_ready)
         self.badge_finished.connect(self._on_badge_finished)
+        self.badge_test_finished.connect(self._on_badge_test_finished)
 
     # ---------- 表单数据 ----------
     def _load_form(self) -> None:
@@ -598,13 +619,14 @@ class MainWindow(QMainWindow):
             if count:
                 self.label_badge_hint.setText(
                     f"已开启：每 {self.spin_badge_interval.value()} 分钟检测一次，"
-                    f"开播后续灯牌并挂满 {self.spin_badge_watch.value()} 分钟。"
+                    f"开播后续灯牌并挂满 {self.spin_badge_watch.value()} 分钟；"
+                    "挂机按实际播放时间累计，暂停会自动恢复。"
                 )
             else:
                 self.label_badge_hint.setText("已开启，但还没有配置直播间地址，请每行填写一个地址。")
         else:
             self.label_badge_hint.setText(
-                "每行一个地址，可添加多个主播；开启后确认开播会自动续灯牌并挂满设定时长。"
+                "每行一个地址，可添加多个主播；挂机按直播视频的实际播放时间累计。"
             )
 
     def _load_cached_friends(self) -> None:
@@ -908,6 +930,38 @@ class MainWindow(QMainWindow):
             daemon=True,
         ).start()
 
+    def _badge_send_test_clicked(self) -> None:
+        confirm = QMessageBox.question(
+            self,
+            "测试送灯牌",
+            "测试会实际赠送一次粉丝灯牌，可能消耗钻石，并且不会进入 20 分钟挂机。\n"
+            "只测试监控列表中的第一个直播间，确定继续吗？",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        if not self._save():
+            return
+        urls = normalize_live_urls(self.input_badge_urls.toPlainText())
+        if not urls:
+            QMessageBox.warning(self, "提示", "请先填写至少一个直播间地址")
+            return
+        self._set_busy(True)
+
+        def worker() -> None:
+            try:
+                result = self.app.submit(
+                    self.app.test_badge_gift(urls=urls[:1])
+                ).result(timeout=2400)
+            except Exception as exc:
+                result = {"ok": False, "detail": str(exc), "results": []}
+            self.badge_test_finished.emit(result)
+
+        threading.Thread(
+            target=worker,
+            name="test-badge-gift",
+            daemon=True,
+        ).start()
+
     def _on_send_finished(self, result: dict) -> None:
         self._set_busy(False)
         detail = str(result.get("detail") or "未知原因")
@@ -924,6 +978,14 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.critical(self, "续灯牌检测失败", detail)
 
+    def _on_badge_test_finished(self, result: dict) -> None:
+        self._set_busy(False)
+        detail = str(result.get("detail") or "未知原因")
+        if result.get("ok"):
+            QMessageBox.information(self, "灯牌测试完成", detail)
+        else:
+            QMessageBox.critical(self, "灯牌测试失败", detail)
+
     def _open_data_dir(self) -> None:
         try:
             os.startfile(str(DATA_DIR))  # type: ignore[attr-defined]
@@ -938,6 +1000,7 @@ class MainWindow(QMainWindow):
             self.button_send,
             self.button_scan,
             self.button_badge_test,
+            self.button_badge_send_test,
         ):
             button.setEnabled(not busy)
 

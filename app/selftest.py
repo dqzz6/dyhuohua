@@ -351,7 +351,7 @@ def _check_embedded_flow() -> None:
                 result["badge"] = await renew_badge_on_current_page(
                     bridge,
                     "https://live.douyin.com/114687942812",
-                    1,
+                    0,
                     logging.getLogger("自检续灯牌"),
                     ready_timeout_seconds=10.0,
                 )

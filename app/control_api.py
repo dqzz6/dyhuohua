@@ -173,6 +173,11 @@ class _Handler(BaseHTTPRequestHandler):
                     max(2400, watch_minutes * 60 + 180),
                 )
                 self._send_json({"ok": True, "data": data})
+            elif method == "POST" and path == "/badge/test":
+                raw_urls = body.get("urls")
+                urls = raw_urls if isinstance(raw_urls, list) else None
+                data = self._run(app.test_badge_gift(urls), 2400)
+                self._send_json({"ok": True, "data": data})
             else:
                 self._send_json({"ok": False, "error": f"未知接口：{method} {path}"}, 404)
         except Exception as exc:

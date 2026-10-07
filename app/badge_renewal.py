@@ -16,7 +16,7 @@ from .paths import BADGE_HISTORY_PATH, LOG_DIR, ensure_dirs
 
 DEFAULT_CHECK_INTERVAL_MINUTES = 10
 DEFAULT_WATCH_MINUTES = 20
-DEFAULT_LIVE_READY_WAIT_SECONDS = 120
+DEFAULT_LIVE_READY_WAIT_SECONDS = 180
 MAX_CHECK_INTERVAL_MINUTES = 1440
 MAX_WATCH_MINUTES = 180
 
@@ -491,21 +491,138 @@ async def _save_badge_debug(browser, live_url: str, label: str, logger) -> str:
         return ""
 
 
-async def _watch_live_room(browser, seconds: int, logger) -> None:
-    """保持直播间页面打开，定期确认页面连接仍然可用。"""
+async def _read_playback_state(browser) -> Dict[str, Any]:
+    script = r"""(() => {
+        const videos = Array.from(document.querySelectorAll("video"));
+        const video = videos.find((item) => {
+            const box = item.getBoundingClientRect();
+            return box.width > 0 && box.height > 0;
+        }) || videos[0] || null;
+        if (!video) {
+            return {
+                url: String(location.href || ""),
+                hasVideo: false,
+                paused: true,
+                ended: true,
+                readyState: 0,
+                currentTime: 0,
+            };
+        }
+        const box = video.getBoundingClientRect();
+        return {
+            url: String(location.href || ""),
+            hasVideo: true,
+            paused: Boolean(video.paused),
+            ended: Boolean(video.ended),
+            readyState: Number(video.readyState || 0),
+            currentTime: Number(video.currentTime || 0),
+            x: box.left + box.width / 2,
+            y: box.top + box.height / 2,
+        };
+    })()"""
+    result = await browser.evaluate(script)
+    return result if isinstance(result, dict) else {}
+
+
+async def _ensure_video_playing(browser, logger) -> bool:
+    script = r"""(async () => {
+        const videos = Array.from(document.querySelectorAll("video"));
+        const video = videos.find((item) => {
+            const box = item.getBoundingClientRect();
+            return box.width > 0 && box.height > 0;
+        }) || videos[0] || null;
+        if (!video) return {hasVideo: false, paused: true};
+        let playError = "";
+        try {
+            await video.play();
+        } catch (error) {
+            playError = String(error && error.message || error || "");
+        }
+        const box = video.getBoundingClientRect();
+        return {
+            hasVideo: true,
+            paused: Boolean(video.paused),
+            ended: Boolean(video.ended),
+            readyState: Number(video.readyState || 0),
+            currentTime: Number(video.currentTime || 0),
+            playError,
+            x: box.left + box.width / 2,
+            y: box.top + box.height / 2,
+        };
+    })()"""
+    state = await browser.evaluate(script)
+    if not isinstance(state, dict):
+        return False
+    if state.get("hasVideo") and (state.get("paused") or state.get("ended")):
+        x = state.get("x")
+        y = state.get("y")
+        if x is not None and y is not None:
+            logger.warning("检测到直播视频暂停，正在自动恢复播放")
+            await browser.click_point(float(x), float(y))
+            await asyncio.sleep(1.5)
+    return bool(state.get("hasVideo")) and not bool(
+        state.get("paused") or state.get("ended")
+    )
+
+
+async def _watch_live_room(
+    browser,
+    live_url: str,
+    seconds: int,
+    logger,
+) -> tuple:
+    """保持直播间播放，按实际播放时间累计挂机时长。"""
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + max(1, int(seconds))
-    while True:
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            return
-        await asyncio.sleep(min(30.0, remaining))
+    target_seconds = max(1, int(seconds))
+    played_seconds = 0.0
+    last_logged_minute = -1
+    no_play_since = None
+    while played_seconds < target_seconds:
+        state = await _read_playback_state(browser)
+        current_url = str(state.get("url") or "")
+        if "live.douyin.com" not in current_url:
+            logger.warning("挂机期间直播间页面被切换，正在重新打开")
+            await browser.goto(live_url)
+            await wait_for_live_room(browser, DEFAULT_LIVE_READY_WAIT_SECONDS)
+            no_play_since = None
+            continue
+
+        if not state.get("hasVideo") or state.get("paused") or state.get("ended"):
+            if no_play_since is None:
+                no_play_since = loop.time()
+            played = await _ensure_video_playing(browser, logger)
+            if not played:
+                if loop.time() - no_play_since >= max(120.0, float(target_seconds)):
+                    return (
+                        False,
+                        int(played_seconds),
+                        "直播间视频长时间未恢复播放，挂机已停止",
+                    )
+                await asyncio.sleep(2.0)
+                continue
+        no_play_since = None
+
+        interval_started = loop.time()
+        await asyncio.sleep(5.0)
         try:
-            await browser.evaluate(
-                "({url: String(location.href || ''), hidden: Boolean(document.hidden)})"
-            )
+            after = await _read_playback_state(browser)
         except Exception as exc:
             logger.warning(f"挂直播间期间页面连接异常，程序会继续等待：{exc}")
+            continue
+        elapsed = min(5.0, loop.time() - interval_started)
+        if (
+            "live.douyin.com" in str(after.get("url") or "")
+            and after.get("hasVideo")
+            and not after.get("paused")
+            and not after.get("ended")
+        ):
+            played_seconds += elapsed
+            played_minutes = int(played_seconds // 60)
+            if played_minutes > last_logged_minute:
+                last_logged_minute = played_minutes
+                total_minutes = max(1, target_seconds // 60)
+                logger.info(f"直播间播放中：已累计 {played_minutes}/{total_minutes} 分钟")
+    return True, int(played_seconds), ""
 
 
 async def renew_badge_on_current_page(
@@ -517,7 +634,7 @@ async def renew_badge_on_current_page(
     ready_timeout_seconds: float = DEFAULT_LIVE_READY_WAIT_SECONDS,
 ) -> Dict[str, Any]:
     """处理当前已打开的直播间页面，适合浏览器自检复用。"""
-    watch_seconds = max(1, int(watch_seconds))
+    watch_seconds = max(0, int(watch_seconds))
     is_live, detail, probe = await wait_for_live_room(browser, ready_timeout_seconds)
     if not is_live:
         return {
@@ -613,6 +730,17 @@ async def renew_badge_on_current_page(
             "watchedSeconds": 0,
         }
 
+    if watch_seconds <= 0:
+        return {
+            "status": "sent",
+            "detail": (
+                f"已完成灯牌赠送测试"
+                f"（入口：{entry.get('matched')}，操作：{send_button.get('matched')}）"
+            ),
+            "liveTitle": detail,
+            "watchedSeconds": 0,
+        }
+
     watched_text = (
         f"{watch_seconds // 60} 分钟" if watch_seconds >= 60 else f"{watch_seconds} 秒"
     )
@@ -620,15 +748,23 @@ async def renew_badge_on_current_page(
         f"已点击「{entry.get('matched')}」和「{send_button.get('matched')}」，"
         f"开始挂直播间 {watched_text}"
     )
-    await _watch_live_room(browser, watch_seconds, logger)
+    watch_ok, watched_seconds, watch_detail = await _watch_live_room(
+        browser,
+        live_url,
+        watch_seconds,
+        logger,
+    )
+    detail_text = f"已续灯牌并挂满 {watched_text}"
+    if not watch_ok:
+        detail_text = f"灯牌已送出，但挂机未完成：{watch_detail}"
     return {
         "status": "sent",
         "detail": (
-            f"已续灯牌并挂满 {watched_text}"
-            f"（入口：{entry.get('matched')}，操作：{send_button.get('matched')}）"
+            detail_text
+            + f"（入口：{entry.get('matched')}，操作：{send_button.get('matched')}）"
         ),
         "liveTitle": detail,
-        "watchedSeconds": watch_seconds,
+        "watchedSeconds": watched_seconds,
     }
 
 
@@ -649,6 +785,26 @@ async def renew_badge_in_live_room(
         browser,
         normalized_url,
         watch_seconds,
+        logger,
+        ready_timeout_seconds=ready_timeout_seconds,
+    )
+
+
+async def test_badge_gift_in_live_room(
+    browser,
+    live_url: str,
+    logger,
+    *,
+    ready_timeout_seconds: float = DEFAULT_LIVE_READY_WAIT_SECONDS,
+) -> Dict[str, Any]:
+    """测试赠送一次灯牌，不进入挂机流程。"""
+    normalized_url = normalize_live_url(live_url)
+    logger.info(f"开始测试赠送灯牌：{normalized_url}")
+    await browser.goto(normalized_url)
+    return await renew_badge_on_current_page(
+        browser,
+        normalized_url,
+        0,
         logger,
         ready_timeout_seconds=ready_timeout_seconds,
     )
