@@ -237,7 +237,10 @@ TEST_BADGE_PAGE = """
 <html><head><meta charset="utf-8"><title>自检主播直播间</title></head>
 <body>
   <div>在线观众 123 本场点赞 456</div>
-  <div id="room_info_bar"><button id="badge-entry">粉丝团</button></div>
+  <div id="room_info_bar">
+    <button id="badge-entry">粉丝团</button>
+    <span id="badge-task">今日任务0/3</span>
+  </div>
   <div id="badge-tooltip" class="dylive-tooltip" style="display:none">
     <div>今日粉丝团任务</div>
     <div id="badge-send">赠送</div>
@@ -249,6 +252,8 @@ TEST_BADGE_PAGE = """
     });
     document.getElementById('badge-send').addEventListener('click', () => {
       window.__badgeSent = true;
+      document.getElementById('badge-task').textContent = '今日任务1/3';
+      document.getElementById('badge-tooltip').insertAdjacentText('beforeend', ' 已完成');
       document.body.setAttribute('data-badge-sent', '1');
     });
   </script>

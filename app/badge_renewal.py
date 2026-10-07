@@ -32,7 +32,7 @@ BADGE_SEND_TEXTS = (
     "续费灯牌",
     "点亮",
 )
-BADGE_TOOLTIP_SEND_TEXTS = ("赠送", "点亮", "续费", "赠送灯牌", "点亮灯牌")
+BADGE_TOOLTIP_SEND_TEXTS = ("赠送",)
 PAYMENT_ERROR_TEXTS = ("余额不足", "钻石不足", "充值")
 LOGIN_ERROR_TEXTS = ("扫码登录", "登录后", "请先登录")
 
@@ -304,13 +304,16 @@ async def _click_text_candidate(
     texts: List[str],
     *,
     scope_selector: str = "",
+    native_click: bool = False,
 ) -> Dict[str, Any]:
     """查找可见文本并点击最近的按钮/可交互节点。"""
     wanted = json.dumps([str(item) for item in texts], ensure_ascii=False)
     scope = json.dumps(str(scope_selector or ""), ensure_ascii=False)
+    native_click_text = "true" if native_click else "false"
     script = f"""(() => {{
         const wanted = {wanted};
         const scopeSelector = {scope};
+        const nativeClick = {native_click_text};
         const roots = scopeSelector
             ? Array.from(document.querySelectorAll(scopeSelector))
             : [document];
@@ -363,7 +366,7 @@ async def _click_text_candidate(
         }});
         const candidate = candidates[0];
         const clickTarget = candidate.target;
-        if (clickTarget) {{
+        if (clickTarget && !nativeClick) {{
             if (typeof clickTarget.click === "function") {{
                 clickTarget.click();
             }} else {{
@@ -386,6 +389,13 @@ async def _click_text_candidate(
         }};
     }})()"""
     result = await browser.evaluate(script)
+    if (
+        native_click
+        and isinstance(result, dict)
+        and result.get("x") is not None
+        and result.get("y") is not None
+    ):
+        await browser.click_point(float(result["x"]), float(result["y"]))
     return result if isinstance(result, dict) else {}
 
 
@@ -395,6 +405,7 @@ async def _click_text_when_ready(
     *,
     scope_selector: str = "",
     timeout_seconds: float = 15.0,
+    native_click: bool = False,
 ) -> Dict[str, Any]:
     """轮询等待页面元素出现后再点击，适配直播页面加载较慢的情况。"""
     loop = asyncio.get_running_loop()
@@ -405,11 +416,66 @@ async def _click_text_when_ready(
             browser,
             texts,
             scope_selector=scope_selector,
+            native_click=native_click,
         )
         if last_result:
             return last_result
         await asyncio.sleep(1.0)
     return last_result
+
+
+async def _read_badge_progress(browser) -> Dict[str, Any]:
+    script = r"""(() => {
+        const info = document.querySelector("#room_info_bar");
+        const infoText = info ? String(info.innerText || "") : "";
+        const match = infoText.match(/今日任务\s*(\d+)\s*\/\s*(\d+)/);
+        const tooltip = Array.from(document.querySelectorAll(".dylive-tooltip"))
+            .find((node) => {
+                const box = node.getBoundingClientRect();
+                return box.width > 0 && box.height > 0;
+            });
+        const tooltipText = tooltip ? String(tooltip.innerText || "") : "";
+        return {
+            progress: match ? Number(match[1]) : null,
+            total: match ? Number(match[2]) : null,
+            completed: tooltipText.includes("已完成"),
+            tooltipText,
+        };
+    })()"""
+    result = await browser.evaluate(script)
+    return result if isinstance(result, dict) else {}
+
+
+async def _wait_for_badge_send_confirmation(
+    browser,
+    before_state: Dict[str, Any],
+    timeout_seconds: float = 15.0,
+) -> tuple:
+    """等待任务进度或已完成状态变化，确认灯牌实际送出。"""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(1.0, float(timeout_seconds))
+    before_progress = before_state.get("progress")
+    before_completed = bool(before_state.get("completed"))
+    last_state: Dict[str, Any] = {}
+    while loop.time() < deadline:
+        try:
+            last_state = await _read_badge_progress(browser)
+        except Exception:
+            last_state = {}
+        progress = last_state.get("progress")
+        completed = bool(last_state.get("completed"))
+        if completed and not before_completed:
+            return True, "页面已显示粉丝团任务完成"
+        if (
+            isinstance(before_progress, int)
+            and isinstance(progress, int)
+            and progress > before_progress
+        ):
+            return True, f"粉丝团任务进度已从 {before_progress} 变为 {progress}"
+        if before_completed and completed:
+            return True, "粉丝团任务此前已完成"
+        await asyncio.sleep(1.0)
+    return False, str(last_state.get("tooltipText") or "")
 
 
 async def _save_badge_debug(browser, live_url: str, label: str, logger) -> str:
@@ -466,12 +532,14 @@ async def renew_badge_on_current_page(
         list(BADGE_ENTRY_TEXTS),
         scope_selector="#room_info_bar",
         timeout_seconds=15.0,
+        native_click=True,
     )
     if not entry:
         entry = await _click_text_when_ready(
             browser,
             list(BADGE_ENTRY_TEXTS),
             timeout_seconds=10.0,
+            native_click=True,
         )
     if not entry:
         await _save_badge_debug(browser, live_url, "未找到灯牌入口", logger)
@@ -482,17 +550,20 @@ async def renew_badge_on_current_page(
             "watchedSeconds": 0,
         }
 
+    before_state = await _read_badge_progress(browser)
     send_button = await _click_text_when_ready(
         browser,
         list(BADGE_TOOLTIP_SEND_TEXTS),
         scope_selector="[class*='dylive-tooltip']",
         timeout_seconds=15.0,
+        native_click=True,
     )
     if not send_button:
         send_button = await _click_text_when_ready(
             browser,
             list(BADGE_SEND_TEXTS),
             timeout_seconds=10.0,
+            native_click=True,
         )
     if not send_button:
         await _save_badge_debug(browser, live_url, "未找到点亮按钮", logger)
@@ -503,7 +574,22 @@ async def renew_badge_on_current_page(
             "watchedSeconds": 0,
         }
 
-    await asyncio.sleep(2.0)
+    confirmed, confirm_detail = await _wait_for_badge_send_confirmation(
+        browser,
+        before_state,
+        timeout_seconds=15.0,
+    )
+    if not confirmed:
+        await _save_badge_debug(browser, live_url, "未确认灯牌送出", logger)
+        return {
+            "status": "failed",
+            "detail": f"已点击「{send_button.get('matched')}」，但没有确认到灯牌送出",
+            "liveTitle": detail,
+            "watchedSeconds": 0,
+        }
+    logger.info(f"灯牌赠送已确认：{confirm_detail}")
+
+    await asyncio.sleep(1.0)
     try:
         body_text = await browser.evaluate(
             "document.body ? String(document.body.innerText || '') : ''"
