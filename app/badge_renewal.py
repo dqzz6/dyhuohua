@@ -16,6 +16,7 @@ from .paths import BADGE_HISTORY_PATH, LOG_DIR, ensure_dirs
 
 DEFAULT_CHECK_INTERVAL_MINUTES = 10
 DEFAULT_WATCH_MINUTES = 20
+DEFAULT_LIVE_READY_WAIT_SECONDS = 120
 MAX_CHECK_INTERVAL_MINUTES = 1440
 MAX_WATCH_MINUTES = 180
 
@@ -31,6 +32,7 @@ BADGE_SEND_TEXTS = (
     "续费灯牌",
     "点亮",
 )
+BADGE_TOOLTIP_SEND_TEXTS = ("赠送", "点亮", "续费", "赠送灯牌", "点亮灯牌")
 PAYMENT_ERROR_TEXTS = ("余额不足", "钻石不足", "充值")
 LOGIN_ERROR_TEXTS = ("扫码登录", "登录后", "请先登录")
 
@@ -297,14 +299,27 @@ async def wait_for_live_room(browser, timeout_seconds: float = 60.0) -> tuple:
     return False, last_detail, last_probe
 
 
-async def _click_text_candidate(browser, texts: List[str]) -> Dict[str, Any]:
+async def _click_text_candidate(
+    browser,
+    texts: List[str],
+    *,
+    scope_selector: str = "",
+) -> Dict[str, Any]:
     """查找可见文本并点击最近的按钮/可交互节点。"""
     wanted = json.dumps([str(item) for item in texts], ensure_ascii=False)
+    scope = json.dumps(str(scope_selector or ""), ensure_ascii=False)
     script = f"""(() => {{
         const wanted = {wanted};
-        const nodes = Array.from(document.querySelectorAll(
-            "button,[role='button'],a,[tabindex],div,span"
-        ));
+        const scopeSelector = {scope};
+        const roots = scopeSelector
+            ? Array.from(document.querySelectorAll(scopeSelector))
+            : [document];
+        const nodes = [];
+        for (const root of roots) {{
+            nodes.push(...Array.from(root.querySelectorAll(
+                "button,[role='button'],a,[tabindex],div,span"
+            )));
+        }}
         const candidates = [];
         for (const node of nodes) {{
             const text = String(node.innerText || node.textContent || "")
@@ -374,9 +389,32 @@ async def _click_text_candidate(browser, texts: List[str]) -> Dict[str, Any]:
     return result if isinstance(result, dict) else {}
 
 
+async def _click_text_when_ready(
+    browser,
+    texts: List[str],
+    *,
+    scope_selector: str = "",
+    timeout_seconds: float = 15.0,
+) -> Dict[str, Any]:
+    """轮询等待页面元素出现后再点击，适配直播页面加载较慢的情况。"""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(1.0, float(timeout_seconds))
+    last_result: Dict[str, Any] = {}
+    while loop.time() < deadline:
+        last_result = await _click_text_candidate(
+            browser,
+            texts,
+            scope_selector=scope_selector,
+        )
+        if last_result:
+            return last_result
+        await asyncio.sleep(1.0)
+    return last_result
+
+
 async def _save_badge_debug(browser, live_url: str, label: str, logger) -> str:
     stamp = datetime.now(BEIJING).strftime("%Y%m%d-%H%M%S")
-    safe_label = re.sub(r"[^0-9A-Za-z_-]+", "_", str(label or "debug"))[:40]
+    safe_label = re.sub(r'[\\/:*?"<>|]+', "_", str(label or "调试"))[:40]
     path = LOG_DIR / "灯牌续费调试" / f"{stamp}-{safe_label}.png"
     try:
         await browser.screenshot(path)
@@ -410,7 +448,7 @@ async def renew_badge_on_current_page(
     watch_seconds: int,
     logger,
     *,
-    ready_timeout_seconds: float = 60.0,
+    ready_timeout_seconds: float = DEFAULT_LIVE_READY_WAIT_SECONDS,
 ) -> Dict[str, Any]:
     """处理当前已打开的直播间页面，适合浏览器自检复用。"""
     watch_seconds = max(1, int(watch_seconds))
@@ -423,8 +461,18 @@ async def renew_badge_on_current_page(
             "watchedSeconds": 0,
         }
 
-    await asyncio.sleep(2.0)
-    entry = await _click_text_candidate(browser, list(BADGE_ENTRY_TEXTS))
+    entry = await _click_text_when_ready(
+        browser,
+        list(BADGE_ENTRY_TEXTS),
+        scope_selector="#room_info_bar",
+        timeout_seconds=15.0,
+    )
+    if not entry:
+        entry = await _click_text_when_ready(
+            browser,
+            list(BADGE_ENTRY_TEXTS),
+            timeout_seconds=10.0,
+        )
     if not entry:
         await _save_badge_debug(browser, live_url, "未找到灯牌入口", logger)
         return {
@@ -434,8 +482,18 @@ async def renew_badge_on_current_page(
             "watchedSeconds": 0,
         }
 
-    await asyncio.sleep(1.5)
-    send_button = await _click_text_candidate(browser, list(BADGE_SEND_TEXTS))
+    send_button = await _click_text_when_ready(
+        browser,
+        list(BADGE_TOOLTIP_SEND_TEXTS),
+        scope_selector="[class*='dylive-tooltip']",
+        timeout_seconds=15.0,
+    )
+    if not send_button:
+        send_button = await _click_text_when_ready(
+            browser,
+            list(BADGE_SEND_TEXTS),
+            timeout_seconds=10.0,
+        )
     if not send_button:
         await _save_badge_debug(browser, live_url, "未找到点亮按钮", logger)
         return {
@@ -494,7 +552,7 @@ async def renew_badge_in_live_room(
     watch_minutes: int,
     logger,
     *,
-    ready_timeout_seconds: float = 60.0,
+    ready_timeout_seconds: float = DEFAULT_LIVE_READY_WAIT_SECONDS,
 ) -> Dict[str, Any]:
     """打开直播间，开播时续灯牌并挂满指定分钟。"""
     normalized_url = normalize_live_url(live_url)

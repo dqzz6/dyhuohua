@@ -237,12 +237,15 @@ TEST_BADGE_PAGE = """
 <html><head><meta charset="utf-8"><title>自检主播直播间</title></head>
 <body>
   <div>在线观众 123 本场点赞 456</div>
-  <button id="badge-entry">粉丝团</button>
-  <button id="badge-send" style="display:none">点亮</button>
+  <div id="room_info_bar"><button id="badge-entry">粉丝团</button></div>
+  <div id="badge-tooltip" class="dylive-tooltip" style="display:none">
+    <div>今日粉丝团任务</div>
+    <div id="badge-send">赠送</div>
+  </div>
   <script>
     document.getElementById('badge-entry').addEventListener('click', () => {
       window.__badgeOpened = true;
-      document.getElementById('badge-send').style.display = 'inline-block';
+      document.getElementById('badge-tooltip').style.display = 'block';
     });
     document.getElementById('badge-send').addEventListener('click', () => {
       window.__badgeSent = true;
@@ -270,7 +273,7 @@ def _check_embedded_flow() -> None:
     from PySide6.QtCore import QMetaObject, Qt
     from PySide6.QtWidgets import QApplication
 
-    from .embedded import EmbeddedBrowser, prepare_debug_port
+    from .embedded import EmbeddedBrowser, find_free_port, prepare_debug_port
     from .service import Application
 
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
@@ -281,9 +284,11 @@ def _check_embedded_flow() -> None:
     browser = EmbeddedBrowser(temp_dir / "profile")
     browser.resize(900, 640)
     browser.show()
-    application = Application(port)
+    application = Application(port, write_runtime=False)
     application.selectors = TEST_SELECTORS
     application.config["daily_enabled"] = False  # 自检期间关闭定时，避免干扰
+    application.config["badge_renewal_enabled"] = False
+    application.config["control_api_port"] = find_free_port()
     application.store = SendStore(temp_dir / "history.json")
     application.start()
 

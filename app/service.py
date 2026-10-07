@@ -75,8 +75,9 @@ class _AsyncWorker(threading.Thread):
 class Application:
     """把内置浏览器、定时器与控制接口组装成一个可长期运行的服务。"""
 
-    def __init__(self, debug_port: int) -> None:
+    def __init__(self, debug_port: int, *, write_runtime: bool = True) -> None:
         ensure_dirs()
+        self._write_runtime_enabled = bool(write_runtime)
         self.logger = setup_logger(LOG_DIR)
         self.store = SendStore()
         self.badge_store = BadgeRenewalStore()
@@ -108,7 +109,8 @@ class Application:
         self._boot = self.worker.submit(self._bootstrap())
         self.control = ControlServer(self, self.token, self.logger, port=int(self.config["control_api_port"]))
         self.control.start()
-        self._write_runtime()
+        if self._write_runtime_enabled:
+            self._write_runtime()
 
     async def _bootstrap(self) -> None:
         self._send_lock = asyncio.Lock()
