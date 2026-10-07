@@ -137,7 +137,7 @@ const findAvatar = (node) => {
   }
   return '';
 };
-const nodes = pickNodes(A.itemSelectors);
+const nodes = pickVisibleNodes(A.itemSelectors);
 const friends = [];
 const loose = [];
 for (const node of nodes) {

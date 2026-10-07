@@ -32,6 +32,7 @@ DEFAULT_SELECTORS: Dict[str, List[str]] = {
         'xpath=//*[@id="sub-app"]//ul',
     ],
     "chat_input": [
+        "xpath=//div[contains(@class,'chat-input-') and @contenteditable='true']",
         "xpath=//div[contains(@class, 'chat-input-')]//div[@contenteditable='true']",
         "xpath=//div[@contenteditable='true' and @role='textbox']",
         "xpath=(//div[@contenteditable='true'])[last()]",

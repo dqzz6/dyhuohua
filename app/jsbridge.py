@@ -26,12 +26,23 @@ const queryOne = (selector, index) => {
   if (!nodes.length) return null;
   return (index === undefined) ? nodes[0] : (nodes[index] || null);
 };
-const pickNodes = (selectorList) => {
+const hasBox = (node) => {
+  if (!node) return false;
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+};
+// 页面有时会把同一份列表渲染两遍（隐藏一份、可见一份）。
+// 优先取可见的那份，实在取不到再退回原逻辑，避免点中 0 尺寸的隐藏节点。
+const pickVisibleNodes = (selectorList) => {
+  let fallback = [];
   for (const selector of (selectorList || [])) {
     const nodes = queryAll(selector);
-    if (nodes.length) return nodes;
+    if (!nodes.length) continue;
+    if (!fallback.length) fallback = nodes;
+    const visible = nodes.filter(hasBox);
+    if (visible.length) return visible;
   }
-  return [];
+  return fallback;
 };
 const normalizeName = (value) => (value || '')
   .normalize('NFKC')

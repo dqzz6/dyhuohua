@@ -105,7 +105,10 @@ ELEMENT_POINT_BODY = r"""
 let node = null;
 for (const selector of A.selectors) {
   const nodes = queryAll(selector);
-  if (nodes.length > A.index) { node = nodes[A.index]; break; }
+  if (nodes.length <= A.index) continue;
+  const candidate = nodes[A.index];
+  if (hasBox(candidate)) { node = candidate; break; }
+  if (!node) node = candidate;
 }
 if (!node) return { found: false };
 node.scrollIntoView({ block: 'center', inline: 'center' });
@@ -122,7 +125,10 @@ JS_CLICK_BODY = r"""
 let node = null;
 for (const selector of A.selectors) {
   const nodes = queryAll(selector);
-  if (nodes.length > A.index) { node = nodes[A.index]; break; }
+  if (nodes.length <= A.index) continue;
+  const candidate = nodes[A.index];
+  if (hasBox(candidate)) { node = candidate; break; }
+  if (!node) node = candidate;
 }
 if (!node) return { clicked: false };
 node.click();
@@ -231,7 +237,7 @@ const nameOf = (node) => {
   const own = (node.innerText || '').trim();
   return own ? own.split('\n')[0] : '';
 };
-const nodes = pickNodes(A.itemSelectors);
+const nodes = pickVisibleNodes(A.itemSelectors);
 const wanted = normalizeName(A.target);
 const names = [];
 let hit = null;
@@ -323,7 +329,8 @@ FOCUS_INPUT_BODY = r"""
 for (const selector of A.selectors) {
   const nodes = queryAll(selector);
   if (!nodes.length) continue;
-  const node = nodes[nodes.length - 1];
+  const visible = nodes.filter(hasBox);
+  const node = visible.length ? visible[visible.length - 1] : nodes[nodes.length - 1];
   node.scrollIntoView({ block: 'center' });
   node.focus();
   if (node.setAttribute) node.setAttribute('data-dymsg-input', '1');
@@ -333,11 +340,24 @@ return { found: false };
 """
 
 
-async def locate_chat_input(bridge, selectors: Dict[str, List[str]]) -> str:
-    info = await bridge.evaluate(_script(FOCUS_INPUT_BODY, {"selectors": selectors.get("chat_input", [])}))
-    if not isinstance(info, dict) or not info.get("found"):
-        raise SendError("未找到聊天输入框，请确认已选中好友且页面已加载完成")
-    return str(info.get("selector") or "")
+async def locate_chat_input(
+    bridge,
+    selectors: Dict[str, List[str]],
+    timeout_seconds: float = 6.0,
+) -> str:
+    """等待并聚焦聊天输入框：点击好友后右侧会话面板需要一点时间才渲染出来。"""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, float(timeout_seconds))
+    while True:
+        info = await bridge.evaluate(
+            _script(FOCUS_INPUT_BODY, {"selectors": selectors.get("chat_input", [])})
+        )
+        if isinstance(info, dict) and info.get("found"):
+            return str(info.get("selector") or "")
+        if loop.time() >= deadline:
+            break
+        await asyncio.sleep(0.5)
+    raise SendError("未找到聊天输入框，请确认已选中好友且页面已加载完成")
 
 
 READ_INPUT_BODY = r"""
