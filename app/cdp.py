@@ -41,12 +41,14 @@ class CdpClient:
         *,
         target_index: int = 0,
         target_url_contains: str = "",
+        target_match_required: bool = False,
     ):
         self._port = int(port)
         self._host = host
         self._logger = logger
         self._target_index = max(0, int(target_index))
         self._target_url_contains = str(target_url_contains or "").strip().lower()
+        self._target_match_required = bool(target_match_required)
         self._ws = None
         self._session_id: Optional[str] = None
         self._counter = 0
@@ -160,6 +162,10 @@ class CdpClient:
             ]
             if matched:
                 page_targets = matched
+            elif self._target_match_required:
+                raise CdpError(
+                    f"还没有找到包含 {self._target_url_contains} 的浏览器页面"
+                )
         if self._target_index < len(page_targets):
             target = page_targets[self._target_index]
         else:

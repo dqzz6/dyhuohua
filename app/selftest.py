@@ -46,6 +46,7 @@ def _check_config() -> None:
     _check(config["send_time"] == "07:30", "配置补全失败")
     _check(config["target_names"] == [], "缺省好友列表应为空")
     _check(config["daily_enabled"] is True, "缺省应开启每日定时")
+    _check(config["live_browser_enabled"] is False, "缺省不应加载直播浏览器")
     migrated = normalize_config({"target_name": "旧版好友"})
     _check(migrated["target_names"] == ["旧版好友"], "旧版单好友配置未迁移")
     deduped = normalize_config({"target_names": ["小明", "小明", " 小红 ", ""]})
@@ -59,6 +60,7 @@ def _check_config() -> None:
         }
     )
     _check(badge["badge_renewal_enabled"] is True, "续灯牌开关配置失败")
+    _check(badge["live_browser_enabled"] is True, "开启续灯牌时应自动启用直播浏览器")
     _check(badge["badge_check_interval_minutes"] == 1, "续灯牌检测间隔下限失败")
     _check(badge["badge_watch_minutes"] == 180, "续灯牌挂机时长上限失败")
     _check(
@@ -275,7 +277,7 @@ TEST_SELECTORS = {
 
 def _check_embedded_flow() -> None:
     """在真实的内置浏览器里跑一遍完整发送流程（用本地自检页面代替抖音页面）。"""
-    from PySide6.QtCore import QMetaObject, Qt
+    from PySide6.QtCore import QMetaObject, Qt, QUrl
     from PySide6.QtWidgets import QApplication
 
     from .embedded import EmbeddedBrowser, find_free_port, prepare_debug_port
@@ -298,6 +300,7 @@ def _check_embedded_flow() -> None:
     application = Application(port, write_runtime=False)
     application.selectors = TEST_SELECTORS
     application.config["daily_enabled"] = False  # 自检期间关闭定时，避免干扰
+    application.config["live_browser_enabled"] = True
     application.config["badge_renewal_enabled"] = False
     application.config["control_api_port"] = find_free_port()
     application.store = SendStore(temp_dir / "history.json")
@@ -373,7 +376,8 @@ def _check_embedded_flow() -> None:
         finally:
             QMetaObject.invokeMethod(qt_app, "quit", Qt.ConnectionType.QueuedConnection)
 
-    browser.setHtml(TEST_PAGE)
+    browser.setHtml(TEST_PAGE, QUrl("https://creator.douyin.com/selftest"))
+    live_browser.setHtml(TEST_BADGE_PAGE, QUrl("https://live.douyin.com/selftest"))
     threading.Thread(target=worker, name="selftest-browser", daemon=True).start()
     qt_app.exec()
     application.stop()

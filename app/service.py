@@ -10,6 +10,7 @@ import secrets
 import threading
 from datetime import datetime
 from typing import Any, Coroutine, Dict, List, Optional
+from urllib.parse import urlparse
 
 from .badge_renewal import (
     BadgeRenewalMonitor,
@@ -84,18 +85,19 @@ class Application:
         self.badge_store = BadgeRenewalStore()
         self.config: Dict[str, Any] = load_config()
         self.selectors = load_selectors()
+        start_url = str(self.config.get("start_url") or "").strip()
+        if not start_url:
+            start_url = str((self.selectors.get("chat_urls") or [""])[0] or "")
+        chat_host = urlparse(start_url).netloc.lower() or "creator.douyin.com"
         self.browser = BrowserBridge(
             debug_port,
             logger=self.logger,
             target_index=0,
-            target_url_contains="creator.douyin.com",
+            target_url_contains=chat_host,
+            target_match_required=True,
         )
-        self.live_browser = BrowserBridge(
-            debug_port,
-            logger=self.logger,
-            target_index=1,
-            target_url_contains="live.douyin.com",
-        )
+        self._debug_port = int(debug_port)
+        self.live_browser: Optional[BrowserBridge] = None
         self.network = NetworkCapture(self.browser.cdp, logger=self.logger)
         self.scheduler = DailyScheduler(self.config_snapshot, self._scheduled_run, self.store, self.logger)
         self.badge_monitor = BadgeRenewalMonitor(
@@ -115,6 +117,21 @@ class Application:
         self._last_badge_result: Dict[str, Any] = {}
         self._stopped = False
 
+    @property
+    def live_browser_enabled(self) -> bool:
+        return bool(self.config.get("live_browser_enabled"))
+
+    def _create_live_browser_bridge(self) -> BrowserBridge:
+        if self.live_browser is None:
+            self.live_browser = BrowserBridge(
+                self._debug_port,
+                logger=self.logger,
+                target_index=1,
+                target_url_contains="live.douyin.com",
+                target_match_required=True,
+            )
+        return self.live_browser
+
     # ---------- 生命周期 ----------
     def start(self) -> None:
         self.worker.start()
@@ -132,7 +149,8 @@ class Application:
         self._live_lock = asyncio.Lock()
         try:
             await self.browser.start()
-            await self.live_browser.start()
+            if self.live_browser_enabled:
+                await self.enable_live_browser()
             await self.network.start()
         except Exception as exc:
             self.logger.error(f"接管内置浏览器失败：{exc}")
@@ -177,7 +195,7 @@ class Application:
         await self.badge_monitor.stop()
         await self.scheduler.stop()
         await self.browser.stop()
-        await self.live_browser.stop()
+        await self.disable_live_browser()
 
     # ---------- 配置 ----------
     def config_snapshot(self) -> Dict[str, Any]:
@@ -204,6 +222,48 @@ class Application:
         await self.open_start_page()
         return await self.browser.status()
 
+    async def enable_live_browser(self) -> Dict[str, Any]:
+        """连接已经创建好的直播浏览器页面。页面必须由界面线程提前加载。"""
+        if not self.live_browser_enabled:
+            return {
+                "enabled": False,
+                "started": False,
+                "url": "",
+                "title": "",
+            }
+        try:
+            bridge = self._create_live_browser_bridge()
+            await bridge.start()
+            status = await bridge.status()
+            status["enabled"] = True
+            return status
+        except Exception as exc:
+            self.logger.warning(f"直播浏览器暂未就绪：{exc}")
+            return {
+                "enabled": True,
+                "started": False,
+                "url": "",
+                "title": "",
+                "error": str(exc),
+            }
+
+    async def disable_live_browser(self) -> Dict[str, Any]:
+        """关闭直播浏览器的 CDP 连接，页面控件由界面线程负责释放。"""
+        bridge = self.live_browser
+        self.live_browser = None
+        if bridge is not None:
+            await bridge.stop()
+        return {"enabled": False, "started": False}
+
+    async def _require_live_browser(self) -> BrowserBridge:
+        if not self.live_browser_enabled:
+            raise RuntimeError("直播浏览器未启用，请先勾选“启用直播浏览器”并保存")
+        bridge = self.live_browser
+        if bridge is None:
+            raise RuntimeError("直播浏览器尚未加载，请先勾选“启用直播浏览器”并保存")
+        await bridge.start()
+        return bridge
+
     async def _guess_logged_in(self) -> Optional[bool]:
         try:
             probe = await probe_page(self.browser, self.selectors)
@@ -217,7 +277,17 @@ class Application:
 
     async def status(self) -> Dict[str, Any]:
         browser_status = await self.browser.status()
-        live_browser_status = await self.live_browser.status()
+        if self.live_browser_enabled and self.live_browser is not None:
+            live_browser_status = await self.live_browser.status()
+            live_browser_status["enabled"] = True
+        else:
+            live_browser_status = {
+                "enabled": bool(self.live_browser_enabled),
+                "started": False,
+                "url": "",
+                "title": "",
+                "page_count": 0,
+            }
         today = self.store.today_key()
         next_run = self.scheduler.next_run_at()
         targets = self._targets()
@@ -246,6 +316,7 @@ class Application:
         next_check = self.badge_store.next_check_at(live_urls, interval)
         return {
             "enabled": bool(config.get("badge_renewal_enabled")),
+            "live_browser_enabled": bool(config.get("live_browser_enabled")),
             "urls": live_urls,
             "check_interval_minutes": interval,
             "watch_minutes": int(config.get("badge_watch_minutes") or 20),
@@ -527,6 +598,10 @@ class Application:
                 return {"ok": False, "detail": str(exc), "results": []}
             if not live_urls:
                 return {"ok": False, "detail": "没有配置需要监控的直播间地址", "results": []}
+            try:
+                live_bridge = await self._require_live_browser()
+            except Exception as exc:
+                return {"ok": False, "detail": str(exc), "results": []}
 
             interval = int(config.get("badge_check_interval_minutes") or 10)
             watch_minutes = int(config.get("badge_watch_minutes") or 20)
@@ -552,7 +627,7 @@ class Application:
                 async with self._live_lock:
                     try:
                         result = await renew_badge_in_live_room(
-                            self.live_browser,
+                            live_bridge,
                             live_url,
                             watch_minutes,
                             self.logger,
@@ -622,12 +697,16 @@ class Application:
                 return {"ok": False, "detail": str(exc), "results": []}
             if not live_urls:
                 return {"ok": False, "detail": "没有配置需要测试的直播间地址", "results": []}
+            try:
+                live_bridge = await self._require_live_browser()
+            except Exception as exc:
+                return {"ok": False, "detail": str(exc), "results": []}
 
             live_url = live_urls[0]
             async with self._live_lock:
                 try:
                     result = await test_badge_gift_in_live_room(
-                        self.live_browser,
+                        live_bridge,
                         live_url,
                         self.logger,
                     )
@@ -707,7 +786,10 @@ class Application:
 
     async def pages_info(self) -> Any:
         chat = await self.browser.status()
-        live = await self.live_browser.status()
+        if self.live_browser_enabled and self.live_browser is not None:
+            live = await self.live_browser.status()
+        else:
+            live = {"url": "", "title": "", "enabled": bool(self.live_browser_enabled)}
         return [
             {
                 "index": 0,

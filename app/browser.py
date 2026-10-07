@@ -18,6 +18,7 @@ class BrowserBridge:
         *,
         target_index: int = 0,
         target_url_contains: str = "",
+        target_match_required: bool = False,
     ):
         self._port = int(debug_port)
         self._logger = logger
@@ -26,6 +27,7 @@ class BrowserBridge:
             logger,
             target_index=target_index,
             target_url_contains=target_url_contains,
+            target_match_required=target_match_required,
         )
 
     @property

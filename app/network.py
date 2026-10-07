@@ -8,7 +8,9 @@ import time
 from collections import deque
 from typing import Any, Deque, Dict, List, Optional
 
-MAX_RECORDS = 300
+MAX_RECORDS = 120
+MAX_BODY_CHARS = 256 * 1024
+TRUNCATED_SUFFIX = "\n...[响应内容过长，已截断]"
 
 
 def _try_json(text: str) -> Any:
@@ -50,6 +52,8 @@ class NetworkCapture:
         request_id = str(params.get("requestId") or "")
         if not request_id:
             return
+        if len(self._pending) >= self._records.maxlen:
+            self._pending.pop(next(iter(self._pending)), None)
         self._pending[request_id] = {
             "url": str(response.get("url") or ""),
             "status": response.get("status"),
@@ -74,8 +78,11 @@ class NetworkCapture:
                 return
         if not body:
             return
-        info["body"] = body
+        info["size"] = len(body)
         info["json"] = _try_json(body)
+        if len(body) > MAX_BODY_CHARS:
+            body = body[:MAX_BODY_CHARS] + TRUNCATED_SUFFIX
+        info["body"] = body
         self._records.append(info)
 
     def clear(self) -> None:
@@ -102,7 +109,7 @@ class NetworkCapture:
                     "index": index,
                     "url": url,
                     "status": record.get("status"),
-                    "size": len(str(record.get("body") or "")),
+                    "size": int(record.get("size") or len(str(record.get("body") or ""))),
                     "keys": keys,
                 }
             )

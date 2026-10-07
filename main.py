@@ -97,15 +97,25 @@ def main(argv=None) -> int:
         application.update_config({"control_api_port": args.port})
 
     browser = EmbeddedBrowser(PROFILE_DIR, profile_name=app_name)
-    live_browser = EmbeddedBrowser(
-        PROFILE_DIR,
-        profile_name=app_name,
-        profile=browser.profile,
-    )
+
+    def create_live_browser() -> EmbeddedBrowser:
+        live_browser = EmbeddedBrowser(
+            PROFILE_DIR,
+            profile_name=app_name,
+            profile=browser.profile,
+        )
+        live_browser.load_url("https://live.douyin.com/")
+        return live_browser
+
+    live_browser = create_live_browser() if application.live_browser_enabled else None
     browser.load_url(application.start_url())
-    live_browser.load_url("https://live.douyin.com/")
     application.start()
-    window = MainWindow(application, browser, live_browser)
+    window = MainWindow(
+        application,
+        browser,
+        live_browser=live_browser,
+        live_browser_factory=create_live_browser,
+    )
     window.show()
 
     exit_code = qt_app.exec()

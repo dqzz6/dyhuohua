@@ -34,6 +34,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "headless": False,
     "control_api_port": DEFAULT_INSTANCE_CONTROL_PORT,
     "send_timeout_seconds": 120,
+    "live_browser_enabled": False,
     "badge_renewal_enabled": False,
     "badge_live_urls": [],
     "badge_check_interval_minutes": DEFAULT_CHECK_INTERVAL_MINUTES,
@@ -87,6 +88,14 @@ def normalize_config(raw: Dict[str, Any]) -> Dict[str, Any]:
     )
     merged["send_timeout_seconds"] = max(30, _to_int(merged.get("send_timeout_seconds"), 120))
     merged["badge_renewal_enabled"] = bool(merged.get("badge_renewal_enabled"))
+    if "live_browser_enabled" in source:
+        merged["live_browser_enabled"] = bool(merged.get("live_browser_enabled"))
+    else:
+        # 旧版本没有独立开关时，延续原有续灯牌行为。
+        merged["live_browser_enabled"] = bool(merged.get("badge_renewal_enabled"))
+    if merged["badge_renewal_enabled"]:
+        # 续灯牌必须依赖直播浏览器，避免配置出现不可执行的组合。
+        merged["live_browser_enabled"] = True
     try:
         merged["badge_live_urls"] = normalize_live_urls(merged.get("badge_live_urls"))
     except ValueError:

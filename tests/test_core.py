@@ -22,6 +22,7 @@ from app.friends import extract_user_details, merge_friends, normalize_key  # no
 from app.gui import filter_friend_names, order_selected_names  # noqa: E402
 from app.message import RANDOM_LINE, WHOLE, pick_message, split_candidates  # noqa: E402
 from app.logger import BEIJING  # noqa: E402
+from app.network import MAX_BODY_CHARS, NetworkCapture  # noqa: E402
 from app.paths import (  # noqa: E402
     DEFAULT_INSTANCE_NAME,
     instance_port_offset,
@@ -64,6 +65,7 @@ def test_normalize_config() -> None:
     assert config["daily_enabled"] is True
     assert config["match_mode"] == "equals"
     assert config["target_names"] == []
+    assert config["live_browser_enabled"] is False
     assert config["badge_renewal_enabled"] is False
     assert config["badge_check_interval_minutes"] == 10
     assert config["badge_watch_minutes"] == 20
@@ -108,10 +110,42 @@ def test_badge_config_normalization() -> None:
             "badge_watch_minutes": 999,
         }
     )
+    assert config["live_browser_enabled"] is True
     assert config["badge_renewal_enabled"] is True
     assert config["badge_live_urls"] == ["https://live.douyin.com/114687942812"]
     assert config["badge_check_interval_minutes"] == 1
     assert config["badge_watch_minutes"] == 180
+
+
+def test_network_capture_limits_body_memory() -> None:
+    class DummyCdp:
+        async def send(self, method, params=None, timeout=25.0):
+            if method == "Network.getResponseBody":
+                return {
+                    "body": "{\"value\":\"" + ("x" * (MAX_BODY_CHARS + 100)) + "\"}",
+                }
+            return {}
+
+    async def scenario() -> None:
+        capture = NetworkCapture(DummyCdp())
+        capture._on_response(
+            {
+                "requestId": "1",
+                "response": {
+                    "url": "https://example.com/data",
+                    "mimeType": "application/json",
+                    "status": 200,
+                },
+            }
+        )
+        await capture._on_finished({"requestId": "1"})
+        records = capture.records()
+        assert len(records) == 1
+        assert records[0]["size"] > MAX_BODY_CHARS
+        assert len(records[0]["body"]) < MAX_BODY_CHARS + 100
+        assert records[0]["json"]["value"].startswith("x")
+
+    asyncio.run(scenario())
 
 
 def test_badge_store_interval_and_daily_success() -> None:
